@@ -21,7 +21,6 @@ void setupFromEeprom(void);
  */
 void setDefaults( void )
 {
-  int i=0;
   DEBUGSL1( "Eeprom setDefaults: entered");
   rcMinLimit = rcMinLimitDefault;
   rcMaxLimit = rcMaxLimitDefault;
@@ -39,6 +38,12 @@ void setDefaults( void )
   strcpy ( thisID, myHostname );
 
   udpPort = ALPACA_DISCOVERY_PORT; 
+  
+  rcMinLimit = rcMinLimitDefault;
+  rcMaxLimit  = rcMaxLimitDefault;
+  rcPosition = initialPosition;
+  brightness = 512;
+  
    
   //#if defined DEBUG
   //Read them back for checking  - also available via status command.
@@ -67,6 +72,18 @@ void saveToEeprom( void )
   DEBUGS1( "Written hostname: ");DEBUGSL1( myHostname );
 
   //Add min limit and max limit, turn on value. 
+  EEPROMWriteAnything( eepromAddr, rcPosition );
+  eepromAddr += sizeof(rcPosition );  
+  EEPROMWriteAnything( eepromAddr, rcMinLimit );
+  eepromAddr += sizeof(rcMinLimit);  
+  EEPROMWriteAnything( eepromAddr, rcMaxLimit );
+  eepromAddr += sizeof(rcMaxLimit);  
+  EEPROMWriteAnything( eepromAddr, initialPosition );
+  eepromAddr += sizeof(initialPosition );  
+  EEPROMWriteAnything( eepromAddr, brightness );
+  eepromAddr += sizeof(brightness );  
+  
+  DEBUGS1( "Written udpPort: ");DEBUGSL1( udpPort );
   
   //Magic number write for data write complete. 
   EEPROM.put( 0, magic );
@@ -93,7 +110,6 @@ void saveToEeprom( void )
 void setupFromEeprom( void )
 {
   int eepromAddr = 0;
-  int i = 0;
     
   DEBUGSL1( "setUpFromEeprom: Entering ");
   byte myMagic = '\0';
@@ -123,6 +139,18 @@ void setupFromEeprom( void )
   eepromAddr  += MAX_NAME_LENGTH * sizeof(char);  
   DEBUGS1( "Read hostname: ");DEBUGSL1( myHostname );
 
+  EEPROMReadAnything( eepromAddr, rcPosition );
+  eepromAddr += sizeof(rcPosition );  
+  EEPROMReadAnything( eepromAddr, rcMinLimit );
+  eepromAddr += sizeof(rcMinLimit);  
+  EEPROMReadAnything( eepromAddr, rcMaxLimit );
+  eepromAddr += sizeof(rcMaxLimit);  
+  EEPROMReadAnything( eepromAddr, initialPosition );
+  eepromAddr += sizeof(initialPosition ); 
+  EEPROMReadAnything( eepromAddr, brightness );
+  eepromAddr += sizeof( brightness ); 
+  
+  
   //Setup MQTT client id based on hostname
   if ( thisID != nullptr ) 
      free ( thisID );

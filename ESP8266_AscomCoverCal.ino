@@ -4,7 +4,7 @@
  Power control in this case is through a p-channel mosfet where the source is wired to 12v and drain is the output. Taking gate to low will turn on the drain output. 
  This means we can move the RC serv to the desired position and thhen turn it off to hold it in that position. 
  Supports web interface on port 80 returning json string
-
+ 
 Notes: 
  
  To do:
@@ -15,9 +15,9 @@ Notes:
  
  Pin Layout:
  ESP8266-01e
- GPIO 3 (Rx) to PWM output - use for calibrator illumination control or secondary dew heater.
+ GPIO 3 (Rx) Used to control power to servo using PNP poweer mosfet.
  GPIO 2 (SDA) to PWM RC signal 
- GPIO 0 (SCL) free
+ GPIO 0 (SCL) Used to control illuminator using PWM via PNP power mosfet. 
  GPIO 1 used as Serial Tx. 
  
  ESP8266-12
@@ -30,6 +30,7 @@ curl -X PUT http://espACC01/api/v1/covercalibrator/0/Connected -d "ClientID=0&Cl
 http://espACC01/api/v1/switch/0/status
 telnet espACC01 32272 (UDP)
  */
+//#define _TEST_RC_ //Enable simple RC servo testing. 
 #define ESP8266_01
 
 #include "DebugSerial.h"
@@ -81,13 +82,22 @@ char* thisID = nullptr;
 bool elPresent = false;
 bool coverPresent = false; 
 int illuminatorPWM = 0;
-int rcMinLimit;
-int rcMaxLimit;
-int rcPosition;//Varies from rcMinLimit to rcMaxLimit
+int rcMinLimit  = rcMinLimitDefault;
+int rcMaxLimit  = rcMaxLimitDefault;
+int initialPosition = 90;
+volatile int rcPosition;//Varies from rcMinLimit to rcMaxLimit
 bool rcPowerOn = false;//Turn on power output transistor - provides power to the servo 
+#define RCPOWERPIN_ON 0
+#define RCPOWERPIN_OFF 1
+
+//Returns the current calibrator brightness in the range 0 (completely off) to MaxBrightness (fully on)
+int brightness;         
+bool brightnessChanged = false;
+//The Brightness value that makes the calibrator deliver its maximum illumination.
 
 //ASCOM variables for the driver
 enum CoverStatus { NotPresent, Closed, Moving, Open, Unknown, Error, Halted };
+const char* coverStatusCh[] = { "NotPresent", "Closed", "Moving", "Open", "Unknown", "Error", "Halted" };
 /*
 NotPresent  0 This device does not have a cover that can be closed independently
 Closed  1 The cover is closed
@@ -97,6 +107,7 @@ Unknown 4 The state of the cover is unknown
 Error 5 The device encountered an error when changing state
 */
 enum CalibratorStatus { CalNotPresent, Off, NotReady, Ready, CalUnknown, CalError };
+const char* calibratorStatusCh[] = { "NotPresent", "Off", "NotReady", "Ready", "Unknown", "Error" };
 
 /*
 NotPresent  0 This device does not have a calibration capability
@@ -111,10 +122,6 @@ Error 5 The calibrator encountered an error when changing state
 enum CoverStatus coverState = Closed;
 enum CoverStatus targetCoverState = Closed;     
 
-//Returns the current calibrator brightness in the range 0 (completely off) to MaxBrightness (fully on)
-int brightness;         
-//The Brightness value that makes the calibrator deliver its maximum illumination.
-
 //Returns the state of the calibration device, if present, otherwise returns "NotPresent"
 enum CalibratorStatus calibratorState = Off;
 enum CalibratorStatus targetCalibratorState = Off ;   
@@ -128,7 +135,9 @@ volatile bool callbackFlag = false;
 ESP8266WebServer server(80);
 ESP8266HTTPUpdateServer updater;
 
-//UDP Port can be edited in setup page
+//ALPACA support additions
+//UDP Port can be edited in setup page - eventually.
+#define ALPACA_DISCOVERY_PORT 32227
 int udpPort = ALPACA_DISCOVERY_PORT;
 WiFiUDP Udp;
 
@@ -138,15 +147,18 @@ ETSTimer timer;
 volatile bool newDataFlag = false;
 void onTimer(void * pArg);
 
+//Used by MQTT included code
 ETSTimer timeoutTimer;
 void onTimeoutTimer(void * pArg);
 volatile bool timeoutFlag = false;
 volatile bool timerSet = false;
 
-//Superceded by use of myServo library
-//ETSTimer biTimer, monoTimer;
-//void onBiTimer( void * pArg);
-//void onMonoTimer( void * pArg);
+ETSTimer rcTimer;
+void onRcTimeoutTimer(void * pArg);
+
+ETSTimer ELTimer;
+void onELTimeoutTimer(void * pArg);
+volatile bool ELTimeoutFlag = false;
 
 const int loopFunctiontime = 250;//ms
 
@@ -157,9 +169,14 @@ const int loopFunctiontime = 250;//ms
 #include "CoverCal_eeprom.h"
 #include "ASCOMAPICommon_rest.h" //ASCOM common driver web handlers. 
 #include "ESP8266_coverhandler.h"
+#include <AlpacaManagement.h>
+
+//State Management functions called in loop.
+int manageCalibratorState( CalibratorStatus calibratorTargetState );
+int manageCoverState( CoverStatus coverTargetState );
 
 //Timer handler for 'soft' interrupt handler
-void onTimer( void * pArg )
+void onTimer( void* pArg )
 {
   newDataFlag = true;
 }
@@ -171,12 +188,75 @@ void onTimeoutTimer( void* pArg )
   timeoutFlag = true;
 }
 
+//Timer handler for 'soft' interrupt handler
+void onRCTimeoutTimer( void * pArg )
+{
+  bool restartTimer = false;
+  debugV( "Updating cover servo - position %d", rcPosition );
+  if( targetCoverState == CoverStatus::Open )
+  {
+    if ( rcPosition >= rcMaxLimit )
+    {
+      coverState = CoverStatus::Open;
+      digitalWrite( POWERPIN, RCPOWERPIN_OFF ); //turn power on
+      rcPowerOn = false;   
+      restartTimer = false;
+    } 
+    else 
+    {
+      if ( rcPowerOn != true )
+      {
+        digitalWrite( POWERPIN, RCPOWERPIN_ON ); //turn power on
+        rcPowerOn = true;                         
+      }
+      rcPosition += RCPOSITIONINCREMENT;
+      myServo.write( rcPosition );
+      restartTimer = true;
+    }
+  }
+  else if ( targetCoverState == CoverStatus::Closed )
+  {
+    if ( rcPosition <= rcMinLimit )
+    {
+      digitalWrite( POWERPIN, RCPOWERPIN_OFF ); //turn power off
+      rcPowerOn = false;                 
+      coverState = CoverStatus::Closed;
+      restartTimer = false;
+    }
+    else
+    {
+      rcPosition -= RCPOSITIONINCREMENT;
+      myServo.write( rcPosition );
+      restartTimer = true;
+    }
+  }
+  else if ( targetCoverState == CoverStatus::Halted )
+  {
+    restartTimer = false;
+    digitalWrite( POWERPIN, RCPOWERPIN_OFF ); //turn power off
+    rcPowerOn = false;                 
+    coverState = CoverStatus::Halted;
+  }
+    
+  if ( restartTimer ) 
+    ets_timer_arm_new( &rcTimer, 100, 0/*one-shot*/, 1);
+}
+
+void onELTimeoutTimer(void * pArg)
+{
+  ELTimeoutFlag = false;
+  
+  //Update our state from NOTREADY to READY
+  calibratorState       = CalibratorStatus::Ready;
+  targetCalibratorState = CalibratorStatus::Ready;
+}
+
 void setup_wifi()
 {
   int zz = 0;
   WiFi.mode(WIFI_STA); 
   WiFi.hostname( myHostname );
-  WiFi.begin( ssid1, password1 );
+  WiFi.begin( ssid4, password4 );
   Serial.print("Searching for WiFi..");
   while (WiFi.status() != WL_CONNECTED) 
   {
@@ -212,7 +292,7 @@ void setup()
   
   //Setup default data structures
   DEBUGSL1("Setup EEprom variables"); 
-  EEPROM.begin( 4 + (2*MAX_NAME_LENGTH) + (2 * sizeof(int) ) );
+  EEPROM.begin( 4 + (2*MAX_NAME_LENGTH) + ( 10 * sizeof(int) ) );
   //setDefaults();
   setupFromEeprom();
   DEBUGSL1("Setup eeprom variables complete."); 
@@ -224,7 +304,7 @@ void setup()
   // Initialize the server (telnet or web socket) of RemoteDebug
   //Debug.begin(HOST_NAME, startingDebugLevel );
   Debug.begin( WiFi.hostname().c_str(), Debug.ERROR ); 
-  Debug.setSerialEnabled(true);//until set false 
+  Debug.setSerialEnabled(false);//until set false 
   // Options
   // Debug.setResetCmdEnabled(true); // Enable the reset command
   // Debug.showProfiler(true); // To show profiler - time between messages of Debug
@@ -240,26 +320,25 @@ void setup()
   client.subscribe( inTopic );
   publishHealth();
     
-  DEBUGSL1("Setup RC controls");
+  debugI("Setting up RC controls");
   
   //Pins mode and direction setup for i2c on ESP8266-01
   //RC pulse pin
   pinMode( RCPIN, OUTPUT);
-  digitalWrite( RCPIN, 0);
-  myServo.attach(RCPIN);  // attaches the servo on GIO2 to the servo object
+  digitalWrite( RCPIN, 0 );
+  myServo.attach(RCPIN);  // attaches the servo on RCPIN to the servo object
+  
   //Drives the RC pulse timing to keep the RC servo in position
-  rcPosition = rcMinLimitDefault; //0 - 180 degrees.  Always start closed at 0
-  myServo.write( rcPosition );
+  myServo.write( rcPosition );//rcPosition is setup from the Eeprom setup. 
   
-  //Currently spare - use to control EL if present. 
-  pinMode( ELPIN, OUTPUT);
-  digitalWrite( ELPIN, 0);
-  
-  //GPIO 3 (normally RX on -01) swap the pin to a GPIO or PWM. 
   //This pin controls the state of the power to the RC servo. Low is ON
   pinMode( POWERPIN, OUTPUT );
-  digitalWrite( POWERPIN, 1);
+  digitalWrite( POWERPIN, RCPOWERPIN_OFF );
   rcPowerOn = false;
+  
+  //Use to control EL brightness via PWM (0-1023) if present. 
+  pinMode( ELPIN, OUTPUT);
+  analogWrite( ELPIN, 0); 
    
   //Setup webserver handler functions
   
@@ -295,50 +374,64 @@ void setup()
   server.on("/setup",                               HTTP_GET, handlerSetup );
   server.on("/status",                              HTTP_GET, handlerStatus);
   server.on("/restart",                             HTTP_ANY, handlerRestart);
-  server.on("/setup/maxbrightness" ,                HTTP_ANY, handlerStatus );//todo
-  server.on("/setup/hostname" ,                     HTTP_ANY, handlerStatus );//todo
+  server.on("/setup/brightness" ,                   HTTP_ANY, handlerSetBrightness );//todo
+  server.on("/setup/hostname" ,                     HTTP_ANY, handlerStatus );
   server.on("/setup/udpport",                       HTTP_ANY, handlerStatus );//todo
-  server.on("/setup/setrcPWMLimits",                HTTP_ANY, handlerStatus );//todo
+  server.on("/setup/limits",                        HTTP_ANY, handlerSetLimits );
 
 //Management interface calls.
-//  server.on("/management/udpport",                       HTTP_ANY, handlerStatus );//todo
-//  server.on("/management/setrcPWMLimits",                HTTP_ANY, handlerStatus );//todo
-
-  //Basic setttings
+/* ALPACA Management and setup interfaces
+ * The main browser setup URL would be http://192.168.1.89:7843/setup
+ * The JSON list of supported interface versions would be available through a GET to http://192.168.1.89:7843/management/apiversions
+ * The JSON list of configured ASCOM devices would be available through a GET to http://192.168.1.89:7843/management/v1/configureddevices
+ */
+  //Management API
+  server.on("/management/description",              HTTP_GET, handleMgmtDescription );
+  server.on("/management/apiversions",              HTTP_GET, handleMgmtVersions );
+  server.on("/management/v1/configuredevices",     HTTP_GET, handleMgmtConfiguredDevices );
+  
+  //Basic settings
   server.on("/", handlerStatus );
   server.onNotFound(handlerNotFound); 
 
   updater.setup( &server );
   server.begin();
-  DEBUGSL1("Web server handlers setup & started");
+  debugI("Web server handlers setup & started");
   
   //Starts the discovery responder server
-  Udp.begin( udpPort);
+  Udp.begin( udpPort );
   
   //Setup timers
-  //setup interrupt-based 'soft' alarm handler for periodic acquisition of new bearing
+  //setup interrupt-based 'soft' alarm handler for periodic update of handler loop
   ets_timer_setfn( &timer, onTimer, NULL ); 
+  
   //Timer for MQTT reconnect handler
   ets_timer_setfn( &timeoutTimer, onTimeoutTimer, NULL ); 
   
-  //Timer for one-shot pulse width timer. 
-  //ets_timer_setfn( &monoTimer, onMonoTimer, NULL ); 
-  //Timer for 20ms timing windows for RC pulse control 
-  //ets_timer_setfn( &biTimer, onBiTimer, NULL ); 
+  //Timer for ELTimer calibrator lamp warmup
+  ets_timer_setfn( &ELTimer, onELTimeoutTimer, NULL ); 
+
+  //Timer for RC Servo flap opener/closer motion
+  ets_timer_setfn( &rcTimer, onRCTimeoutTimer, NULL ); 
   
   //fire loop function handler timer every 1000 msec
   ets_timer_arm_new( &timer, 1000, 1 /*repeat*/, 1);
 
-  //Supports the MQTT async reconnect timer. Set elsewhere.
+  //Supports the MQTT async reconnect timer. Armed elsewhere.
   //ets_timer_arm_new( &timeoutTimer, 2500, 0/*one-shot*/, 1);
   
-  //Turn on the power to the RC 
-  digitalWrite ( POWERPIN, 0 );
+  //Supports the calibrator lamp warm up sequence. Armed elsewhere
+  //ets_timer_arm_new( &timeoutTimer, 10000, 0/*one-shot*/, 1);
+
+  //set the startup position  
+  myServo.write( rcPosition );
+  //Leave the servo power off though 
+  digitalWrite ( POWERPIN, RCPOWERPIN_OFF );
 
   //baseline driver variables
-  
-  Serial.println( "Setup complete" );
-  Debug.setSerialEnabled(false);//until set false   
+ 
+  debugI( "Setup complete" );
+  Debug.setSerialEnabled(true); 
 }
 
 //Main processing loop
@@ -346,21 +439,27 @@ void loop()
 {
   String timestamp;
   String output;
+  static int pos = rcMinLimit;
   
-  DynamicJsonBuffer jsonBuffer(256);
-  JsonObject& root = jsonBuffer.createObject();
-
-  int udpBytesIn = Udp.parsePacket();
-  if( udpBytesIn > 0  ) 
-    handleDiscovery( udpBytesIn );
-    
   if( newDataFlag == true ) 
   {
     //do some work
+#ifndef _TEST_RC_
     manageCoverState( targetCoverState );
     manageCalibratorState ( targetCalibratorState );
+#else
+    //Test servo
+    pos = pos + 5;
+    if ( pos >= rcMaxLimit )
+    {
+      pos = rcMinLimit;
+      debugI( "reset pos to minLimit" ); 
+    }
+    debugI( "Writing position %i to pin %d", pos, RCPIN );
+    myServo.write( pos );
     
-    myServo.write( rcPosition );
+    delay(5);  
+#endif
     newDataFlag = false;
   }
     
@@ -370,12 +469,13 @@ void loop()
     {
       //publish results
       publishHealth();
+      publishFunction();
       callbackFlag = false;
     }
   }
   else
   {
-    reconnect();
+    reconnectNB();
     client.subscribe (inTopic);
   }
   client.loop();
@@ -383,7 +483,10 @@ void loop()
   //Handle web requests
   server.handleClient();
 
-    // Remote debug over WiFi
+  //Handle Alpaca requests
+  handleManagement();
+  
+  // Remote debug over WiFi
   Debug.handle();
   // Or
   //debugHandle(); // Equal to SerialDebug  
@@ -395,55 +498,344 @@ void loop()
   String msg = "";
   ///enum CoverStatus = {NotPresent, Closed, Moving, Open, Unknown, Error, Halted };
   //need a targetState.
-  debugI( "Entered %s", "manageCoverState " );
+  debugI( "current state is %s, targetState is %s", coverStatusCh[coverState], coverStatusCh[targetState] );
   switch( coverState )
   {          
-      case NotPresent: 
+      case CoverStatus::NotPresent: 
+          debugW("Cover not present - why calling ?");
           break;
-      case Moving:
-          if( targetCoverState == Closed && rcPosition <= rcMinLimit ) 
+      case CoverStatus::Moving:
+          //current status is moving, new target status is asking for a different action. 
+          switch (targetState)
           {
-            digitalWrite( POWERPIN, 1 ); //turn power off                
-            coverState = Closed;
-          }
-          else if ( targetCoverState == Open && rcPosition >= rcMaxLimit )
-          {
-            digitalWrite( POWERPIN, 1 ); //turn power off                
-            coverState = Open;
-          }
-          else //Move towards target position
-          {
-            if ( targetCoverState == Closed )
-              rcPosition = ( rcPosition <= rcMinLimit ) ? rcMinLimit : rcPosition -5;
-            else 
-              rcPosition = ( rcPosition >= rcMaxLimit ) ? rcMaxLimit :  rcPosition +5;              
+            //If we change these target states while moving, the timer will respond automatically
+            case CoverStatus::Closed:
+            case CoverStatus::Open:
+                  debugI("Still moving  - %s to %s", coverStatusCh[coverState], coverStatusCh[targetState] );
+                  break;
+            case CoverStatus::Halted:
+                  //Let timer elapse and turn power off
+                  debugI( "Change of state requested from Moving to Halted - letting timer elapse");
+                  break;
+            default:
+                  debugW("Requested target state of %s while moving - does it make sense ?", coverStatusCh[targetState] ); 
+                  break;
           }
           break;
-      case Open: 
-          if ( rcPosition <=rcMaxLimit ) 
+      case CoverStatus::Halted:
+          switch( targetState )
           {
-            coverState = Moving;
-            digitalWrite( POWERPIN, 0 ); //turn power on
+            case CoverStatus::Halted:
+                 debugI( "Requested targetState of 'Halted' when already Halted. Nothing to do.");
+                 break;
+            case CoverStatus::Closed:
+                 debugI("targetState changed to Closed from Halted. Starting motion timer");
+                 if ( rcPosition > rcMinLimit ) 
+                 {
+                    coverState = CoverStatus::Moving;
+                    digitalWrite( POWERPIN, RCPOWERPIN_ON ); //turn power on
+                    rcPowerOn = true;     
+                    //turn on the timer to move the servo smoothly
+                    ets_timer_arm_new( &rcTimer, 200, 0/*one-shot*/, 1 /*ms*/);      
+                 }
+                 break;
+            case CoverStatus::Open:
+                 debugI("targetState changed to Open from Halted. Starting motion timer");
+                 if ( rcPosition < rcMaxLimit ) 
+                 {
+                    coverState = CoverStatus::Moving;
+                    digitalWrite( POWERPIN, RCPOWERPIN_ON ); //turn power on
+                    rcPowerOn = true;     
+                    //turn on the timer to move the servo smoothly
+                    ets_timer_arm_new( &rcTimer, 200, 0/*one-shot*/, 1 /*ms*/);      
+                 }
+                 break;
+            case CoverStatus::Moving:
+            default:
+              debugW("unexpected targetState while Open");
+              break;
           }
-            break;
-      case Closed:
-          if ( rcPosition >= rcMinLimit ) 
+          break;
+      case CoverStatus::Open: 
+          switch( targetState )
           {
-            coverState = Moving;
-            digitalWrite( POWERPIN, 0 ); //turn power on
+            case CoverStatus::Open:
+                 debugI( "Requested targetState of 'Open' when already open. Nothing to do.");
+                 break;
+            case CoverStatus::Closed:
+                 if ( rcPosition > rcMinLimit ) 
+                 {
+                    coverState = CoverStatus::Moving;
+                    digitalWrite( POWERPIN, RCPOWERPIN_ON ); //turn power on
+                    rcPowerOn = true;     
+                    //turn on the timer to move the servo smoothly
+                    ets_timer_arm_new( &rcTimer, 200, 0/*one-shot*/, 1 /*ms*/);      
+                 }
+                 else 
+                 {
+                    coverState = CoverStatus::Closed;
+                    //ensure power is off
+                    digitalWrite( POWERPIN, RCPOWERPIN_OFF ); //turn power off
+                    rcPowerOn = false;     
+                 }
+                 break;
+            case CoverStatus::Halted:
+              //State will inform active timer - let it lapse.
+              debugI("targetState changed to Halted from Moving. Waiting for motion timer");
+              break;
+            case CoverStatus::Moving:
+            default:
+              debugW("unexpected targetState while Open");
+              break;
           }
-            break;
-      case Unknown:
-      case Error:
+          break;
+      case CoverStatus::Closed:
+          //current status is Closed, new target status is asking for a different action. 
+          switch (targetState)
+          {
+            //If we change these target states while moving, the timer will respond automatically
+            case CoverStatus::Closed:
+                  //nothing to do 
+                  debugI("targetState set to Closed while Closed - nothing to do");
+                  break;
+            case CoverStatus::Open:
+                  debugI("targetState set to Open from Closed");
+                   if ( rcPosition < rcMaxLimit ) 
+                   {
+                      debugD("Arming timer to open cover from Closed");
+                      coverState = CoverStatus::Moving;
+                      digitalWrite( POWERPIN, RCPOWERPIN_ON ); //turn power on
+                      rcPowerOn = true;     
+                      //turn on the timer to move the servo smoothly
+                      ets_timer_arm_new( &rcTimer, 200, 0/*one-shot*/, 1 /*ms*/);      
+                   }
+                  break;          
+            case CoverStatus::Halted:
+                  debugI("targetState set to Halted from Closed");
+                  if ( rcPosition <= rcMinLimit )
+                  {
+                    coverState = Closed;
+                    debugI("targetState updated to Closed due to position while halted");
+                  }                    
+                  break;
+            default:
+                  debugW("Requested target state of %s while Closed - does it make sense ?", coverStatusCh[targetState] ); 
+                  break;
+          }
+          break;
+      case CoverStatus::Unknown:
+      case CoverStatus::Error:
+          switch ( targetCoverState )
+          {
+            case CoverStatus::Open:
+            case CoverStatus::Closed:
+              debugI("Requested targetState of %s from %s - setting Halted first", coverStatusCh[coverState], coverStatusCh[targetCoverState] );
+              //Let the coverState be updated to halted and then next iteration will move.  
+              break;
+            case CoverStatus::Halted:
+              digitalWrite( POWERPIN, RCPOWERPIN_OFF ); //turn power off
+              rcPowerOn = false;                   
+              coverState = CoverStatus::Halted;
+              break;
+            case CoverStatus::NotPresent:            
+            case CoverStatus::Unknown:
+            case CoverStatus::Error:
+            default:
+              debugW( "Changing state from %s to %s - nothing to do", coverStatusCh[coverState], coverStatusCh[targetCoverState] );
+              break;
+          }          
       default:
         break;
   }
-
+  
+  debugI( "Exiting - final state %s, targetState %s ", coverStatusCh[coverState], coverStatusCh[targetCoverState] );
   return 0;
 }
- 
+
  int manageCalibratorState( CalibratorStatus calibratorTargetState )
  {
+     
+    debugI( "Entered - current state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
+    switch ( calibratorState )
+    {
+      case CalibratorStatus::CalNotPresent:
+        switch (calibratorTargetState)
+        {
+          case CalibratorStatus::CalNotPresent:
+          case CalibratorStatus::NotReady:
+          case Off:
+          case Ready:      
+          case CalibratorStatus::CalUnknown:
+          case CalibratorStatus::CalError:
+          default:
+            debugW("Asked to do something when calibrator not present");
+            break;          
+        }
+        debugV( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
+        break; 
+      case CalibratorStatus::NotReady:
+        switch (calibratorTargetState)
+        {
+          case CalibratorStatus::CalNotPresent:
+              debugW("Invalid target state requested - from NotReady to %s", calibratorStatusCh[calibratorTargetState] );
+              break;
+          case CalibratorStatus::NotReady:
+              //This is not a valid target state
+              debugV("Ignoring intermediate target state requested - from NotReady to %s", calibratorStatusCh[calibratorTargetState] );
+              break;
+          case Ready:
+              //Get here while we are waiting for the current state to become READY - brightness may be changedin the meantime.
+              if( brightnessChanged )
+              {
+                //we have a new brightness. 
+                //turn on to desired brightness - this is different from setting to off/0. 
+                analogWrite( ELPIN, brightness );
+                brightnessChanged = false;
+                debugI( "Brightness changed (%d) while warming up lamp - set new brightness", brightness);
+              }
+              else
+                debugV("Waiting for timer to move to Ready");
+               break;
+          case Off:
+              //turn off              
+              //adjust brightness to be zero or just use brightness to record current requested setting when on ?
+              analogWrite( ELPIN, 0 ); 
+              calibratorState = CalibratorStatus::Off;
+              break; 
+          case CalibratorStatus::CalError:
+          case CalibratorStatus::CalUnknown:
+          default:
+            debugW("targetstate invalid : %s", calibratorStatusCh[calibratorTargetState] );
+            break;          
+        }    
+        debugV( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
+        break;
+      case CalibratorStatus::Off:
+        switch (calibratorTargetState)
+        {
+          case CalibratorStatus::CalNotPresent:
+             debugW("targetstates invalid - attempt to jump to NotPresent from Off : %s", calibratorStatusCh[calibratorTargetState] );             
+             break;
+          case CalibratorStatus::NotReady:
+             //waiting for timer to move to ready
+              break;
+          case CalibratorStatus::Ready:      
+             //turn on to desired brightness
+             analogWrite( ELPIN, brightness );
+             //Turn on timer for illuminator to stabilise
+             ets_timer_arm_new( &ELTimer, 5000, 0/*one-shot*/, 1);
+             //update state to waiting
+             calibratorState = NotReady;
+             brightnessChanged = false;
+             debugD("Lamp requested to turn on at brightness %d", brightness );
+             break;
+          case CalibratorStatus::Off://Already off 
+             calibratorState = Off;
+             break;              
+          case CalibratorStatus::CalUnknown:
+          case CalibratorStatus::CalError:
+          default:
+            debugW("targetstates invalid : %s", calibratorStatusCh[calibratorTargetState]);
+            break;          
+        }
+        debugV( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
+        break;
+
+      case CalibratorStatus::Ready:      
+        switch ( calibratorTargetState )
+        {
+          case CalibratorStatus::CalNotPresent:
+              debugW("targetState invalid - trying to set NotPresent from Ready");
+              break;
+          case CalibratorStatus::NotReady:
+              //Waiting for timer completion.
+              break;
+          case CalibratorStatus::Ready:  
+              //Already on - leave alone.
+              if( brightnessChanged )
+              {
+                debugD( "Arming (0) timer to turn on lamp" ); 
+                analogWrite( ELPIN, brightness );
+                //Turn on timer for illuminator to stabilise
+                ets_timer_arm_new( &ELTimer, 5000, 0/*one-shot*/, 1);
+                calibratorState = NotReady;
+                brightnessChanged = false;
+                debugI( "Lamp changed while already on - setting new brightness");
+              }
+              else
+                debugD( "Lamp on  - leaving alone");
+              break;
+          case CalibratorStatus::Off:
+          case CalibratorStatus::CalError:
+              //Turn off 
+              analogWrite( ELPIN, 0 );
+              calibratorState = Off;
+              break;
+          case CalibratorStatus::CalUnknown:
+          default:
+              debugD("targetState invalid - trying to move from Unknown to %s", calibratorStatusCh[calibratorTargetState]  );
+            break;          
+        }
+        debugV( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] ); 
+        break;
+      case CalibratorStatus::CalUnknown:
+        switch( calibratorTargetState )  
+        {
+          case CalibratorStatus::Off:
+            //Turn off 
+            analogWrite( ELPIN, 0 );
+            calibratorState = Off;
+            break;
+          case CalibratorStatus::Ready:
+            debugD( "Arming (1) timer to turn on lamp" ); 
+            analogWrite( ELPIN, brightness );
+            //Turn on timer for illuminator to stabilise
+            ets_timer_arm_new( &ELTimer, 5000, 0/*one-shot*/, 1);
+            calibratorState = NotReady;
+            brightnessChanged = false;
+            debugD("Lamp requested to turn on at brightness %d", brightness );
+            break;
+          default:
+            debugW( "Attempting to update calibratorState from Unknown to %s - valid ?", calibratorStatusCh[calibratorTargetState] ); 
+          break;      
+        }
+        debugV( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
+        break;
+      case CalibratorStatus::CalError:
+        //Assume we can recover from an error by moving to a valid state. 
+        switch (calibratorTargetState)
+        {      
+          case CalibratorStatus::CalNotPresent:
+          case CalibratorStatus::NotReady:             
+             debugD("Target states invalid - attempt to jump to NotPresent from Error : %s", calibratorStatusCh[calibratorTargetState] );             
+             break;
+          case CalibratorStatus::Ready:      
+            //turn on to desired brightness
+            debugD("Arming (2) timer to turn on lamp");
+            analogWrite( ELPIN, brightness );
+            //Turn on timer for illuminator to stabilise
+            ets_timer_arm_new( &ELTimer, 5000, 0/*one-shot*/, 1);
+            calibratorState = NotReady;
+            brightnessChanged = false;
+            debugD("Lamp requested to turn on at brightness %d", brightness );           
+            break;
+          case CalibratorStatus::Off:
+             analogWrite( ELPIN, 0 );
+             calibratorState = Off;
+             break;              
+          case CalibratorStatus::CalError:
+          default:
+            debugW("targetstates invalid : %d", calibratorTargetState );
+            break;          
+        }
+        debugV( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );        
+        break;      
+
+      default:
+        debugE( "Unknown calibrator state on entry! %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
+        break;
+    }
+  debugI( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );        
   return 0;
  }
  
@@ -492,47 +884,35 @@ void callback(char* topic, byte* payload, unsigned int length)
     debugW( "Failed to publish : %s to %s", output.c_str(), outTopic.c_str() );
  }
  
- void handleDiscovery( int udpBytesCount )
+ //Publish state to the function subscription point. 
+ void publishFunction(void )
  {
-    char inBytes[64];
-    String message;
-    DiscoveryPacket discoveryPacket;
- 
-    DynamicJsonBuffer jsonBuffer(256);
-    JsonObject& root = jsonBuffer.createObject();
-    
-    Serial.printf("UDP: %i bytes received from %s:%i\n", udpBytesCount, Udp.remoteIP().toString().c_str(), Udp.remotePort() );
+  String outTopic;
+  String output;
+  String timestamp;
+  
+  //checkTime();
+  getTimeAsString2( timestamp );
 
-    // We've received a packet, read the data from it
-    Udp.read( inBytes, udpBytesCount); // read the packet into the buffer
-
-    // display the packet contents
-    for (int i = 0; i < udpBytesCount; i++ )
-    {
-      Serial.print( inBytes[i]);
-      if (i % 32 == 0)
-      {
-        Serial.println();
-      }
-      else Serial.print(' ');
-    } // end for
-    Serial.println();
-   
-    //Is it for us ?
-    char protocol[16];
-    strncpy( protocol, (char*) inBytes, 16);
-    if ( strcasecmp( discoveryPacket.protocol, protocol ) == 0 )
-    {
-      Udp.beginPacket( Udp.remoteIP(), Udp.remotePort() );
-      //Respond with discovery message
-      root["IPAddress"] = WiFi.localIP().toString().c_str();
-      root["Type"] = DriverType;
-      root["AlpacaPort"] = 80;
-      root["Name"] = WiFi.hostname();
-      root["UniqueID"] = system_get_chip_id();
-      root.printTo( message );
-      Udp.write( message.c_str(), sizeof( message.c_str() ) * sizeof(char) );
-      Udp.endPacket();   
-    }
+  //publish to our device topic(s)
+  DynamicJsonBuffer jsonBuffer(256);
+  JsonObject& root = jsonBuffer.createObject();
+  root["Time"] = timestamp;
+  root["hostname"] = myHostname;
+  root["coverState"] = coverState;
+  root["calibratorState"] = calibratorState;
+  
+  root.printTo( output);
+  
+  //Put a notice out regarding device health
+  outTopic = outFnTopic;
+  outTopic.concat( myHostname );
+  outTopic.concat( "/" );
+  outTopic.concat( DriverType );
+  
+  if ( client.publish( outTopic.c_str(), output.c_str(), true ) )
+    debugI( "topic: %s, published with value %s \n", outTopic.c_str(), output.c_str() );
+  else
+    debugW( "Failed to publish : %s to %s", output.c_str(), outTopic.c_str() );
  }
  

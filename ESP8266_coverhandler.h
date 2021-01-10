@@ -94,10 +94,11 @@ void handlerBrightnessGet(void)
 
     DynamicJsonBuffer jsonBuffer(256);
     JsonObject& root = jsonBuffer.createObject();
-    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "Brightness", Success , "" );    
+    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "BrightnessGet", Success , "" );    
     root["Value"] = brightness;
     
     root.printTo(message);
+    debugI( "%s", message.c_str() );
     server.send(200, F("application/json"), message);
     return ;
 }
@@ -119,11 +120,11 @@ void handlerMaxBrightnessGet(void)
 
     DynamicJsonBuffer jsonBuffer(256);
     JsonObject& root = jsonBuffer.createObject();
-    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "MaxBrightness", Success , "" );    
+    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "MaxBrightnessGet", Success , "" );    
     root["Value"] = MAXDIGITALVALUE;
-    targetCoverState = Open;
         
     root.printTo(message);
+    debugI( "%s", message.c_str() );
     server.send(200, F("application/json"), message);
     return ;
 }
@@ -146,10 +147,11 @@ void handlerCoverStateGet(void)
       transID = server.arg(argToSearchFor[1]).toInt();
 
     JsonObject& root = jsonBuffer.createObject();
-    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "CoverState", Success , "" );    
+    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "CoverStateGet", Success , "" );    
  
-    root["Value"] = coverState;
+    root["Value"] = (int) coverState;
     root.printTo(message);
+    debugI( "%s", message.c_str() );
     server.send(returnCode, F("application/json"), message);
     return;
 }
@@ -172,10 +174,11 @@ void handlerCalibratorStateGet(void)
       transID = server.arg(argToSearchFor[1]).toInt();
    
     JsonObject& root = jsonBuffer.createObject();
-    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "CalibratorState", Success , "" );    
+    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "CalibratorStateGet", Success , "" );    
  
-    root["Value"] = calibratorState;
+    root["Value"] = (int) calibratorState;
     root.printTo(message);
+    debugI( "%s", message.c_str() );
     server.send( returnCode = 200, F("application/json"), message);
     return;
 }
@@ -192,7 +195,7 @@ void handlerCalibratorOnPut(void)
     uint32_t clientID= -1;
     uint32_t transID = -1;
     String argToSearchFor[] = { "clientID", "ClientTransactionID", "brightness" };
-    int input;
+    int input = 0;
     
     if( hasArgIC( argToSearchFor[0], server, false ) )
       clientID = server.arg(argToSearchFor[0]).toInt();
@@ -203,52 +206,51 @@ void handlerCalibratorOnPut(void)
     if ( hasArgIC( argToSearchFor[2], server, false) )
       input = server.arg(argToSearchFor[2]).toInt();
 
-    if( input >= 0 && input <= MAXDIGITALVALUE )
+    if( connected == clientID) 
     {
-      switch ( calibratorState )
+      if( input >= 0 && input <= MAXDIGITALVALUE )
       {
-        case NotPresent:
-          errCode = notImplemented;
-          errMsg = "Calibrator not present";
-          break; 
-        case Off:
-          //turn on -- do something
-          //set lamp power or something...
-          analogWrite( ELPIN, brightness );
-          //Turn on timer for illuminator to stabilise
-          //ets_arm_new
-          calibratorState = NotReady;
-          errCode = Success;
-          errMsg = "";
-          break; 
-        case NotReady:
-          errCode = Success;
-          errMsg = "";
-          //Let the timer turn it on when it will
-          break;
-        case Ready:
-          //Timer should have turned this on. Unless brightness has changed. 
-          errCode = Success;
-          errMsg = "";    
-        case Unknown:
-        case Error:
-        default:
-          break;
+        debugD( "New brightness requested: %i", input );          
+        switch ( calibratorState )
+        {
+          case CalibratorStatus::CalNotPresent:
+            errCode = notImplemented;
+            errMsg = "Calibrator not present";            
+            break; 
+          case CalibratorStatus::Off:
+          case CalibratorStatus::NotReady:
+          case CalibratorStatus::Ready:
+          case CalibratorStatus::CalUnknown:
+          case CalibratorStatus::CalError:
+            brightness = input;
+            brightnessChanged = true;
+            targetCalibratorState = CalibratorStatus::Ready;
+            errCode = Success;
+            errMsg = "";
+            break; 
+          default:
+            break;
+        }
+      }
+      else
+      {
+         errCode = invalidValue;
+         errMsg = "brightness not in acceptable range";        
       }
     }
     else
     {
-       errCode = invalidValue;
-       errMsg = "Value out of range";   
+       errCode = notConnected;
+       errMsg = "not connected";   
     }
+    
     DynamicJsonBuffer jsonBuffer(256);
     JsonObject& root = jsonBuffer.createObject();
-    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "handlerCalibratorOn", Success, "" );    
-    
-    root["ErrorMessage"]= errMsg;
-    root["ErrorNumber"] = errCode;
-
+    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "handlerCalibratorOnPut", errCode, errMsg );    
     root.printTo(message);
+    debugD( "New brightness is %d", brightness );
+    debugI( "%s", message.c_str() );
+    
     server.send(returnCode = 200, F("application/json"), message);
     return;
 }
@@ -264,8 +266,7 @@ void handlerCalibratorOffPut(void)
     
     uint32_t clientID= -1;
     uint32_t transID = -1;
-    String argToSearchFor[] = { "clientID", "ClientTransactionID", "state" };
-    bool input;
+    String argToSearchFor[] = { "clientID", "ClientTransactionID", };
     
     if( hasArgIC( argToSearchFor[0], server, false ) )
       clientID = server.arg(argToSearchFor[0]).toInt();
@@ -273,37 +274,25 @@ void handlerCalibratorOffPut(void)
     if ( hasArgIC( argToSearchFor[1], server, false) )
       transID = server.arg(argToSearchFor[1]).toInt();
 
-    
-    debugD( "targetState requested %i ", calibratorState );
-    switch ( calibratorState )
+    if ( connected == clientID )
     {
-      case CalNotPresent:
-        errCode = valueNotSet;
-        errMsg = "not present";
-        break; 
-      case Off:
-        //turn off -- do something
-        analogWrite( ELPIN, 0);
-        calibratorState = Off;
-        break; 
-      case NotReady:
-        errCode = valueNotSet;
-        errMsg = "not ready";
-        break;
-      case Ready:      
-      case Unknown:
-      case CalError:
-      default:
-        break;
+      debugD( "New state requested: %s", "off" );
+      targetCalibratorState = CalibratorStatus::Off;
+      errMsg = "";
+      errCode = 0;
     }
+    else
+    {
+      errMsg = "This client is not 'connected'";
+      errCode = notConnected;
+    }
+    
     DynamicJsonBuffer jsonBuffer(256);
     JsonObject& root = jsonBuffer.createObject();
-    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "handleCalibratorOff", Success, "" );    
-    
-    root["ErrorMessage"]= errMsg;
-    root["ErrorNumber"] = errCode;
-
+    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "handlerCalibratorOffPut", errCode, errMsg );      
     root.printTo(message);
+    debugD( "%s", message.c_str() );
+    
     server.send(returnCode, F("application/json"), message);
     return;
 }
@@ -319,42 +308,33 @@ void handlerCloseCoverPut(void)
 
     uint32_t clientID= -1;
     uint32_t transID = -1;
-    String argToSearchFor[] = { "clientID", "ClientTransactionID", };
-    int input;
+    String argToSearchFor[] = { "ClientID", "ClientTransactionID", };
     
     if( hasArgIC( argToSearchFor[0], server, false ) )
       clientID = server.arg(argToSearchFor[0]).toInt();
       
     if ( hasArgIC( argToSearchFor[1], server, false) )
       transID = server.arg(argToSearchFor[1]).toInt();
-
-    errCode = Success;
-    errMsg = "";   
-  
-    DynamicJsonBuffer jsonBuffer(256);
-    JsonObject& root = jsonBuffer.createObject();
-    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "handlerCalibratorOn", Success, "" );    
-    
+     
     //Set targetCoverState to desired state. 
-    if ( connected != NOT_CONNECTED || connected != clientID )
+    if ( connected != clientID )
     {
       errCode = notConnected;  
       errMsg = "Not connected";         
     }
-    else if ( coverState == Closed )
-    {
-       errCode = invalidValue;
-       errMsg = "Already closed";
-    }
     else
     {
-      targetCoverState = Closed;
+      targetCoverState = CoverStatus::Closed;
+      errCode = Success;
+      errMsg = "";   
     }
 
-    root["ErrorMessage"]= errMsg;
-    root["ErrorNumber"] = errCode;
-
+    DynamicJsonBuffer jsonBuffer(256);
+    JsonObject& root = jsonBuffer.createObject();
+    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "handlerCloseCoverPut", errCode, errMsg );    
     root.printTo(message);
+
+    debugD( "%s", message.c_str() );
     server.send(returnCode = 200, F("application/json"), message);
     return;
 }
@@ -370,42 +350,45 @@ void handlerHaltCoverPut(void)
 
     uint32_t clientID= -1;
     uint32_t transID = -1;
-    String argToSearchFor[] = { "clientID", "ClientTransactionID", };
-    int input;
+    String argToSearchFor[] = { "ClientID", "ClientTransactionID", };
     
     if( hasArgIC( argToSearchFor[0], server, false ) )
       clientID = server.arg(argToSearchFor[0]).toInt();
       
     if ( hasArgIC( argToSearchFor[1], server, false) )
       transID = server.arg(argToSearchFor[1]).toInt();
-
-    errCode = Success;
-    errMsg = "";   
-  
-    DynamicJsonBuffer jsonBuffer(256);
-    JsonObject& root = jsonBuffer.createObject();
-    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "handlerCalibratorOn", Success, "" );    
-    
+ 
     //Set targetCoverState to desired state. 
-    if ( connected != NOT_CONNECTED || connected != clientID )
+    if ( connected != clientID )
     {
       errCode = notConnected;  
       errMsg = "Not connected";         
     }
-    else if ( coverState != Moving )
+    else if ( coverState != CoverStatus::Moving )
     {
-       errCode = invalidValue;
-       errMsg = "Not moving";
+       //Just being explicit - dont return an error if it is in a safe place
+       if( coverState == CoverStatus::Halted ) 
+       {
+          errCode = Success;
+          errMsg = "";   
+       }
+       else 
+       {
+          errCode = invalidValue;
+          errMsg = "Not moving";
+       }       
     }
     else
     {
-      targetCoverState = Halted;
+      targetCoverState = CoverStatus::Halted;
+      errCode = Success;
+      errMsg = "";   
     }
-
-    root["ErrorMessage"]= errMsg;
-    root["ErrorNumber"] = errCode;
-
+    DynamicJsonBuffer jsonBuffer(256);
+    JsonObject& root = jsonBuffer.createObject();
+    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "handlerHaltCoverPut", errCode, errMsg );    
     root.printTo(message);
+    debugI( "%s", message.c_str() );
     server.send(returnCode = 200, F("application/json"), message);
     return;
 }
@@ -422,7 +405,6 @@ void handlerOpenCoverPut(void)
     uint32_t clientID= -1;
     uint32_t transID = -1;
     String argToSearchFor[] = { "clientID", "ClientTransactionID", };
-    int input;
     
     if( hasArgIC( argToSearchFor[0], server, false ) )
       clientID = server.arg(argToSearchFor[0]).toInt();
@@ -430,34 +412,25 @@ void handlerOpenCoverPut(void)
     if ( hasArgIC( argToSearchFor[1], server, false) )
       transID = server.arg(argToSearchFor[1]).toInt();
 
-    errCode = invalidValue;
-    errMsg = "Value out of range";   
-  
-    DynamicJsonBuffer jsonBuffer(256);
-    JsonObject& root = jsonBuffer.createObject();
-    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "handlerCalibratorOn", Success, "" );    
-    
     //Set targetCoverState to desired state. 
-    //Set targetCoverState to desired state. 
-    if ( connected != NOT_CONNECTED || connected != clientID )
+    if ( connected != clientID )
     {
       errCode = notConnected;  
       errMsg = "Not connected";         
     }
-    else if ( coverState == Open )
-    {
-       errCode = invalidValue;
-       errMsg = "Alredy open";
-    }
     else
     {
-      targetCoverState = Open;
+      targetCoverState = CoverStatus::Open;
+      errCode = Success;
+      errMsg = "";
     }
     
-    root["ErrorMessage"]= errMsg;
-    root["ErrorNumber"] = errCode;
-
+    DynamicJsonBuffer jsonBuffer(256);
+    JsonObject& root = jsonBuffer.createObject();
+    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "handlerCoverOpenPut", errCode, errMsg );    
     root.printTo(message);
+
+    debugI("%s", message.c_str() );
     server.send(returnCode = 200, F("application/json"), message);
     return;
 }
@@ -481,18 +454,23 @@ void handlerNotFound()
 
   DynamicJsonBuffer jsonBuffer(250);
   JsonObject& root = jsonBuffer.createObject();
-  jsonResponseBuilder( root, clientID, transID, ++serverTransID, "HandlerNotFound", invalidOperation , "No REST handler found for argument - check ASCOM Switch v2 specification" );    
+  String missingURL = "HandlerNotFound";
+  missingURL.concat(":");
+  missingURL.concat( server.uri() );
+  
+  jsonResponseBuilder( root, clientID, transID, ++serverTransID, missingURL, invalidOperation , "No REST handler found for argument - check ASCOM Switch v2 specification" );    
   root["Value"] = 0;
   root.printTo(message);
+  debugI( "%s", message.c_str() );
   server.send(responseCode, "application/json", message);
 }
 
-void handlerRestart()
+void handlerRestart( void)
 {
-  String message;
-  int responseCode = 200;
-  message.concat( "restarting on user request" );
-  server.send(responseCode, "text/plain", message);
+  //Trying to do a redirect to the rebooted host so we pick up from where we left off. 
+  server.sendHeader( WiFi.hostname().c_str(), String("/status"), true);
+  server.send ( 302, F("text/html"), "<!Doctype html><html>Redirecting for restart</html>");
+  debugI("Reboot requested");
   device.restart();
 }
 
@@ -515,50 +493,40 @@ void handlerNotImplemented()
   jsonResponseBuilder( root, clientID, transID, ++serverTransID, "HandlerNotFound", notImplemented  , "No REST handler implemented for argument - check ASCOM Dome v2 specification" );    
   root["Value"] = 0;
   root.printTo(message);
+  
+  debugI( "%s", message.c_str() );
   server.send(responseCode, "application/json", message);
 }
 
-//GET ​/switch​/{device_number}​/status
 //Get a descriptor of all the switches managed by this driver for discovery purposes
 void handlerStatus(void)
 {
     String message, timeString;
-    int i=0;
     int returnCode = 400;
-
-    uint32_t clientID= -1;
-    uint32_t transID = -1;
-    String argToSearchFor[] = { "clientID", "ClientTransactionID", };
-    
-    if( hasArgIC( argToSearchFor[0], server, false ) )
-      clientID = server.arg(argToSearchFor[0]).toInt();
-    
-    if ( hasArgIC( argToSearchFor[1], server, false) )
-      transID = server.arg(argToSearchFor[1]).toInt();
-    
+   
     DynamicJsonBuffer jsonBuffer(512);
     JsonObject& root = jsonBuffer.createObject();
-    jsonResponseBuilder( root, clientID, transID, ++serverTransID, "Status", 0, "" );    
-    
+   
     root["time"] = getTimeAsString( timeString );
     root["host"] = myHostname;
-    root["connected"] = (connected == NOT_CONNECTED )?"true":"false";
+    root["connected"] = (connected == NOT_CONNECTED )?"false":"true";
     root["clientID"] = connected;
-    root["coverState"] = coverState;
-    if( coverState != NotPresent )
+    root["coverState"] = coverStatusCh[coverState];
+    if( coverState != CoverStatus::NotPresent )
     {
-      root["position"] = 0;
+      root["position"] = rcPosition;
     }
-    root["calibratorState"]  = calibratorState;
-    if( calibratorState != NotPresent ) 
+    
+    root["calibratorState"]  = calibratorStatusCh[calibratorState];
+    if( calibratorState != CalibratorStatus::CalNotPresent ) 
     {
       root["brightness"] = brightness;
     }
     
     Serial.println( message);
-    //Don't use prettyprint for a bunch of json parsers - they don't like it. 
     root.printTo(message);
-    server.send(returnCode, "application/json", message);
+    
+    server.send(returnCode, F("application/json"), message);
     return;
 }
 
@@ -567,28 +535,23 @@ void handlerStatus(void)
  */
  void handlerSetup(void)
  {
-   String message, timeString, err= "";
-    uint32_t switchID = -1;   
+    String message, timeString, err= "";
     int returnCode = 400;
-    int i=0;
 
     if ( server.method() == HTTP_GET )
     {
         message = setupFormBuilder( message, err );      
-        server.send( returnCode, "text/html", message ); 
+        server.send( returnCode, F("text/html"), message ); 
     }
  }
- 
- /*
-  * Handler to update the hostname from the form.
+  
+ /* 
+  *  Handler to update the hostname from the form.
   */
  void handlerSetupHostname(void) 
  {
-    String message, timeString, err= "";
-    uint32_t clientID = (uint32_t)server.arg("clientID").toInt();
-    uint32_t transID = (uint32_t)server.arg("ClientTransactionID").toInt();
-    uint32_t switchID = -1;
-    
+    String message, timeString, err = "";
+   
     int returnCode = 400;
     String argToSearchFor[] = { "hostname", "numSwitches"};
      
@@ -619,7 +582,94 @@ void handlerStatus(void)
       err = "Bad HTTP request verb";
       message = setupFormBuilder( message, err );      
     }
-    server.send(returnCode, "text/html", message);
+    server.send(returnCode, F("text/html"), message);
+    return;
+ }
+
+ /* 
+  *  Handler to update the hostname from the form.
+  */
+ void handlerSetLimits(void) 
+ {
+    String message, timeString, err = "";
+    int newMinLimit = -1;
+    int newMaxLimit = -1;
+    
+    int returnCode = 400;
+    String argToSearchFor[] = { "minLimit", "maxLimit" };
+     
+    debugV( "Entered" );
+    if ( server.method() == HTTP_POST || server.method() == HTTP_PUT || server.method() == HTTP_GET)
+    {
+        if( hasArgIC( argToSearchFor[0], server, false )  )
+          newMinLimit = server.arg( argToSearchFor[0] ).toInt();
+        
+        if( hasArgIC( argToSearchFor[1], server, false )  )
+          newMaxLimit = server.arg( argToSearchFor[1] ).toInt();
+                
+        //Potentially we could set the min/max limits either way around - ie reverse the direction of closure. 
+        if( newMinLimit != -1 && newMinLimit >= rcMinLimitDefault && newMinLimit <= rcMaxLimitDefault &&
+            newMaxLimit != -1 && newMaxLimit >= rcMinLimitDefault && newMaxLimit <= rcMaxLimitDefault )
+        {
+          rcMinLimit = newMinLimit;
+          rcMaxLimit = newMaxLimit;
+          saveToEeprom();
+          returnCode = 200;    
+        }
+        else
+        {
+          returnCode = 400;
+          err = "Invalid values - one or both outside range";
+        }
+    }
+    else
+    {
+      returnCode = 400;
+      err = "Bad HTTP request verb";
+    }
+
+    message = setupFormBuilder( message, err );      
+    server.send( returnCode, F("text/html"), message);
+    return;
+ }
+
+/* 
+  *  Handler to update the hostname from the form.
+  */
+ void handlerSetBrightness(void) 
+ {
+    String message, timeString, err = "";
+    int newBrightness = -1;
+     
+    int returnCode = 400;
+    String argToSearchFor[] = { "brightness", };
+     
+    if ( server.method() == HTTP_POST || server.method() == HTTP_PUT || server.method() == HTTP_GET)
+    {
+        if( hasArgIC( argToSearchFor[0], server, false )  )
+          newBrightness  = server.arg( argToSearchFor[0] ).toInt();
+        
+        //Potentially we could set the min/max limits either way around - ie reverse the direction of closure. 
+        if( newBrightness != -1 && newBrightness >= 0 && newBrightness <= MAXDIGITALVALUE )
+        {
+          brightness = newBrightness ;
+          saveToEeprom();
+          returnCode = 200;    
+        }
+        else
+        {
+          returnCode = 400;
+          err = "Invalid value - outside range";
+        }
+    }
+    else
+    {
+      returnCode = 400;
+      err = "Bad HTTP request verb";
+    }
+
+    message = setupFormBuilder( message, err );      
+    server.send( returnCode, F("text/html"), message);
     return;
  }
 
@@ -765,7 +815,7 @@ label em { position: absolute;right: 5px;top: 20px;}\
 //</form>
 //</div>
 
-  //Device settings hostname and number of switches on this device
+  //Device settings - hostname 
   htmlForm += "<div class=\"row\">";
   htmlForm += "<div class=\"col-sm-12\"><h2> Enter new hostname for device</h2><br/></div>";
   htmlForm += "<p>Changing the hostname will cause the device to reboot and may change the IP address!</p></div>";
@@ -778,6 +828,59 @@ label em { position: absolute;right: 5px;top: 20px;}\
   htmlForm += "\"/>";
   htmlForm += "<label for=\"hostname\" > Hostname </label>";
   htmlForm += "<input type=\"submit\" value=\"Update\" />";
+  htmlForm += "</form></div>";
+
+  //Device settings - opening minlimit and maxlimit 
+  htmlForm += "<div class=\"row\">";
+  htmlForm += "<div class=\"col-sm-12\"><br><h2> Enter new opener arm limits for device</h2><br/></div>";
+  htmlForm += "</div>";
+  htmlForm += "<div class=\"row float-left\" id=\"deviceAttrib\" bgcolor='blue'>\n";
+  htmlForm += "<form method=\"POST\" id=\"limits\" action=\"http://";
+  htmlForm.concat( myHostname );
+  htmlForm += "/setup/limits\">";
+  
+  //Update the min swing limit ( closed) 
+  htmlForm += "<input type=\"number\" name=\"minLimit\" min=";
+  htmlForm.concat ( rcMinLimit );
+  htmlForm.concat( " max=" );
+  htmlForm.concat( rcMaxLimit );
+  htmlForm.concat( " value=\"") ;
+  htmlForm.concat( rcMinLimit );
+  htmlForm += "\"/>";
+  htmlForm += "<label for=\"minLimit\" > Closed limit </label>";
+
+  //Update the max swing limit ( open ) 
+  htmlForm += "<input type=\"number\" name=\"maxLimit\" min=\"";
+  htmlForm.concat ( rcMinLimit );
+  htmlForm.concat( "\" max=\"" );
+  htmlForm.concat( rcMaxLimit );
+  htmlForm.concat( "\" value=\"") ;
+  htmlForm.concat( rcMaxLimit );
+  htmlForm += "\"/>";
+  htmlForm += "<label for=\"maxLimit\" > Open limit </label>";
+  
+  htmlForm += "<input type=\"submit\" value=\"Update\" />";
+  htmlForm += "</form></div>";
+
+  //Device settings - brightness 
+  htmlForm += "<div class=\"row\">";
+  htmlForm += "<div class=\"col-sm-12\"><br><h2> Enter new brightness</h2><br/></div>";
+  htmlForm += "</div>";
+  htmlForm += "<div class=\"row float-left\" id=\"brightness\" bgcolor='blue'>\n";
+  htmlForm += "<form method=\"POST\" id=\"setbrightness\" action=\"http://";
+  htmlForm.concat( myHostname );
+  htmlForm += "/setup/setbrightness\">";
+
+  //Update the brightness 
+  htmlForm += "<input type=\"number\" name=\"brightness\" min=\"";
+  htmlForm.concat ( 0 );
+  htmlForm.concat( "\" max=\"" );
+  htmlForm.concat( MAXDIGITALVALUE );
+  htmlForm.concat( "\" value=\"") ;
+  htmlForm.concat( brightness );
+  htmlForm += "\"/>";
+  htmlForm += "<label for=\"maxLimit\" > Open limit </label>";
+  htmlForm += "<input type=\"submit\" value=\"Set brightness\" />";
   htmlForm += "</form></div>";
   
 /*
