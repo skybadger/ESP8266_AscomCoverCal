@@ -8,7 +8,8 @@
 Notes: 
  
  To do:
- Complete Setup page - in progress
+ Complete Setup page chunking - in progress - ready for test
+ Test multiple leaf servo control
   
  Done: 
  Complete EEPROM calls - done.
@@ -29,12 +30,36 @@ Test:
 curl -X PUT http://espACC01/api/v1/covercalibrator/0/Connected -d "ClientID=0&ClientTransactionID=0&Connected=true" (note cases)
 http://espACC01/api/v1/switch/0/status
 telnet espACC01 32272 (UDP)
+
+Dependencies
+PCA 9685 16-channel i2c servo control board : https://github.com/NachtRaveVL/PCA9685-Arduino - see Arduino library manager in IDE 
+JSON parsing for arduino : https://arduinojson.org/v5/api/
+Remote debug over telnet : https://github.com/JoaoLopesF/RemoteDebug
+MQTT pubsub library : https://pubsubclient.knolleary.net/api.html
+
+Change Log
+12/06/2021 Completed ALPACA Management API - tested using Conform for dynamic registration
+12/06/2021 Updated setup form handlers to separate Device and driver variables. 
+12/09/2021 Updated PCA9865 code from PCA9865 driver examples  - example code works fine on hardware. Now to expand.
+           Updated code to move as much as possible into PSTR memory using F() function to free up the dynamic heap. 
+21/12/2021 Updated code to support PCA9685. Tested working in software - validated using conform. 
+           Updated AlpacaMgmt code to successfully dynamically find device. Requires DeviceType to be accurarately set to a known type. 
+           Updated coverHandler to be able to set cover position and calibrator state from the web page. 
+           Currently failing to drive servo board though. 
+           Currently serial output also fails after i2c scan. 
+04/01/22   Fixed serial reporting - due to bad defines in SERIAL_DEBUG. include order changed to handle. 
+           Fixed ALPACA device discovery routine
+04/01/2022 Updated HTML to set limits, positions and brightness
+           Updated HTML to add reset and update cmmmands to device setup
+           Updated GUID to recognise this device  
+           Added ability to set which method of opening flaps is used - enum created. Set at compile time unless a REST call is added.         
  */
 //#define _TEST_RC_ //Enable simple RC servo testing. 
 #define ESP8266_01
+#define DEBUG
+//Enables basic debugging statements for ESP
+#define DEBUG_ESP_MH               
 
-#include "DebugSerial.h"
-#include "SkybadgerStrings.h"
 #include "CoverCal_common.h"
 #include "AlpacaErrorConsts.h"
 #include <esp8266_peri.h> //register map and access
@@ -48,14 +73,33 @@ telnet espACC01 32272 (UDP)
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPUpdateServer.h>
 #include <ArduinoJson.h>  //https://arduinojson.org/v5/api/
-#define MAX_TIME_INACTIVE 0 //to turn off the de-activation of a telnet session
-#include "RemoteDebug.h"  //https://github.com/JoaoLopesF/RemoteDebug
-//Create a remote debug object
-RemoteDebug Debug;
 
-#include <Servo.h> //Arduino example sketch
+//Create a remote debug object
+#if !defined DEBUG_DISABLED
+RemoteDebug Debug;
+#endif 
+
+#if defined USE_SERVO_PCA9685
+// Uncomment or -D this define to enable debug output.
+#define PCA9685_ENABLE_DEBUG_OUTPUT
+//These settings need to be edited in the driver header file not here. They are here so you can see if we have done anything with them.
+// Uncomment or -D this define to enable use of the software i2c library (min 4MHz+ processor).
+//#define PCA9685_ENABLE_SOFTWARE_I2C             // http://playground.arduino.cc/Main/SoftwareI2CLibrary
+// Uncomment or -D this define to swap PWM low(begin)/high(end) phase values in register reads/writes (needed for some chip manufacturers).
+//#define PCA9685_SWAP_PWM_BEG_END_REGS
+
+#include "PCA9685.h"
+//Multi-servo code for handling multi - flaps generalised to the 1-16 flap case 
+//Library using default B000000 (A5-A0) i2c address (I2C 7-bit address is B 1 A5 A4 A3 A2 A1 A0, ie 0x40 ) , and default Wire @400kHz
+PCA9685 pwmController; //( B1000000, Wire, 100000 );//Base address, i2c interface and i2c speed
+// Linearly interpolates between standard 2.5%/12.5% phase length (102/512) for -90°/+90°
+//Which means all servo values need to be adjusted from 0-180 range to -90/+90 range by subtracting 90
+PCA9685_ServoEval pwmServo;
+#else
+#include <Servo.h> //Arduino native servo library
 Servo myServo;  // create servo object to control a servo
 // twelve servo objects can be created on most boards
+#endif 
 
 extern "C" { 
 //Ntp dependencies - available from v2.4
@@ -72,7 +116,6 @@ extern "C" {
 time_t now; //use as 'gmtime(&now);'
 
 //Strings
-const char* defaultHostname = "espACC01";
 char* myHostname = nullptr;
 
 //MQTT settings
@@ -82,49 +125,6 @@ char* thisID = nullptr;
 bool elPresent = false;
 bool coverPresent = false; 
 int illuminatorPWM = 0;
-int rcMinLimit  = rcMinLimitDefault;
-int rcMaxLimit  = rcMaxLimitDefault;
-int initialPosition = 90;
-volatile int rcPosition;//Varies from rcMinLimit to rcMaxLimit
-bool rcPowerOn = false;//Turn on power output transistor - provides power to the servo 
-#define RCPOWERPIN_ON 0
-#define RCPOWERPIN_OFF 1
-
-//Returns the current calibrator brightness in the range 0 (completely off) to MaxBrightness (fully on)
-int brightness;         
-bool brightnessChanged = false;
-//The Brightness value that makes the calibrator deliver its maximum illumination.
-
-//ASCOM variables for the driver
-enum CoverStatus { NotPresent, Closed, Moving, Open, Unknown, Error, Halted };
-const char* coverStatusCh[] = { "NotPresent", "Closed", "Moving", "Open", "Unknown", "Error", "Halted" };
-/*
-NotPresent  0 This device does not have a cover that can be closed independently
-Closed  1 The cover is closed
-Moving  2 The cover is moving to a new position
-Open  3 The cover is open
-Unknown 4 The state of the cover is unknown
-Error 5 The device encountered an error when changing state
-*/
-enum CalibratorStatus { CalNotPresent, Off, NotReady, Ready, CalUnknown, CalError };
-const char* calibratorStatusCh[] = { "NotPresent", "Off", "NotReady", "Ready", "Unknown", "Error" };
-
-/*
-NotPresent  0 This device does not have a calibration capability
-Off 1 The calibrator is off
-NotReady  2 The calibrator is stabilising or is not yet in the commanded state
-Ready 3 The calibrator is ready for use
-Unknown 4 The calibrator state is unknown
-Error 5 The calibrator encountered an error when changing state
-*/
-
-//Returns the state of the device cover, if present, otherwise returns "NotPresent"
-enum CoverStatus coverState = Closed;
-enum CoverStatus targetCoverState = Closed;     
-
-//Returns the state of the calibration device, if present, otherwise returns "NotPresent"
-enum CalibratorStatus calibratorState = Off;
-enum CalibratorStatus targetCalibratorState = Off ;   
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -135,10 +135,7 @@ volatile bool callbackFlag = false;
 ESP8266WebServer server(80);
 ESP8266HTTPUpdateServer updater;
 
-//ALPACA support additions
-//UDP Port can be edited in setup page - eventually.
-#define ALPACA_DISCOVERY_PORT 32227
-int udpPort = ALPACA_DISCOVERY_PORT;
+//Setup the management discovery listener
 WiFiUDP Udp;
 
 //Hardware device system functions - reset/restart, timers etc
@@ -165,7 +162,7 @@ const int loopFunctiontime = 250;//ms
 //Order sensitive
 #include "Skybadger_common_funcs.h"
 #include "JSONHelperFunctions.h"
-#include "CoverCal_common.h"
+
 #include "CoverCal_eeprom.h"
 #include "ASCOMAPICommon_rest.h" //ASCOM common driver web handlers. 
 #include "ESP8266_coverhandler.h"
@@ -174,6 +171,12 @@ const int loopFunctiontime = 250;//ms
 //State Management functions called in loop.
 int manageCalibratorState( CalibratorStatus calibratorTargetState );
 int manageCoverState( CoverStatus coverTargetState );
+
+//wrapper function used to control output power transistor for servo/PCA9865
+void setRCPower( bool powerState );
+
+//Unit servo test function 
+void testServo();
 
 //Timer handler for 'soft' interrupt handler
 void onTimer( void* pArg )
@@ -188,59 +191,184 @@ void onTimeoutTimer( void* pArg )
   timeoutFlag = true;
 }
 
-//Timer handler for 'soft' interrupt handler
+#if defined USE_SERVO_PCA9685
 void onRCTimeoutTimer( void * pArg )
 {
+  //flap tracking variables
+  static int flapId = 0;
   bool restartTimer = false;
-  debugV( "Updating cover servo - position %d", rcPosition );
+  
+  //keep flapId in range - check -ve wrap behaviour by pre-adding flapCount
+  flapId = ( flapId + flapCount ) % flapCount;
+
+  //Not sure we are allowed to use the Serial port here in this soft interrupt handler.
+  //but it seems to work OK
+  debugV( "Updating cover servo - flap %d, position %d, flap Min: %d, max: %d", flapId, flapPosition[ flapId ], flapMinLimit[flapId], flapMaxLimit[flapId] );
+
   if( targetCoverState == CoverStatus::Open )
   {
-    if ( rcPosition >= rcMaxLimit )
+    //We can do this in two ways - open each flap fully then the next or open all flaps a small step
+    //if they overlap, we need to do it sequentially. 
+    //Either way, we need to open each flap a small amount each time. 
+    //experimentally - opening each a small amount in sequence causines them to jam if they overlap.   
+    
+    //Have we finished - could be starting from halted state rather than fully open or closed 
+    //Is the last flap in each (0 to flapCount-1) circuit fully open ?
+    if( flapPosition[ flapCount -1] >= flapMaxLimit[flapCount -1] )
     {
+      debugV( "Halting servo motion - flap %d, position %d", flapId, flapPosition[ flapId ] );
       coverState = CoverStatus::Open;
-      digitalWrite( POWERPIN, RCPOWERPIN_OFF ); //turn power on
-      rcPowerOn = false;   
+      setRCPower( RCPOWERPIN_OFF ); //turn power off
+      flapId = flapCount - 1;
       restartTimer = false;
-    } 
-    else 
+    }
+    else
     {
       if ( rcPowerOn != true )
       {
-        digitalWrite( POWERPIN, RCPOWERPIN_ON ); //turn power on
-        rcPowerOn = true;                         
+        setRCPower( RCPOWERPIN_ON ); //turn power on
       }
-      rcPosition += RCPOSITIONINCREMENT;
-      myServo.write( rcPosition );
+
+      flapPosition[flapId] += MULTIFLAPSINCREMENTCOUNT;//((flapMaxLimit[flapId] - flapMinLimit[flapId] ) / MULTIFLAPSINCREMENTCOUNT);
+      if( flapPosition[flapId] >= flapMaxLimit[flapId] ) 
+      {  
+        flapPosition[flapId] = flapMaxLimit[flapId];
+        if ( movementMethod  == FlapMovementType::EachFlapInSequence )
+          flapId++;//we do each flap fully, then the next by incremting the flap id on completion. 
+      }            
+      
+      if( movementMethod == AllFlapsAtOnce )
+      {
+        for ( int i = 0 ; i< flapCount; i++ ) 
+          pwmController.setChannelPWM( i, pwmServo.pwmForAngle( flapPosition[ 0 ] - 90 ) );
+        flapId = 0; //reset here since we do all flaps together, using the position of the first. 
+      }
+      else 
+        pwmController.setChannelPWM( flapId, pwmServo.pwmForAngle( flapPosition[ flapId ] - 90 ) );
+
+      if( movementMethod == EachFlapIncremental )
+      {
+        flapId++;
+      }
       restartTimer = true;
     }
   }
   else if ( targetCoverState == CoverStatus::Closed )
   {
-    if ( rcPosition <= rcMinLimit )
+    //Have we closed yet ?
+    if ( flapPosition[ 0 ] <= flapMinLimit[ 0 ] )
     {
-      digitalWrite( POWERPIN, RCPOWERPIN_OFF ); //turn power off
-      rcPowerOn = false;                 
+      debugV( "Halting servo motion - flap %d, position %d", flapId, flapPosition[ flapId ] );
       coverState = CoverStatus::Closed;
+      setRCPower( RCPOWERPIN_OFF ); //turn power off   
+      flapId = 0;
       restartTimer = false;
     }
-    else
+    else    //we're still closing
     {
-      rcPosition -= RCPOSITIONINCREMENT;
-      myServo.write( rcPosition );
+      flapPosition[flapId] -= MULTIFLAPSINCREMENTCOUNT; //((flapMaxLimit[flapId] - flapMinLimit[flapId] )/ MULTIFLAPSINCREMENTCOUNT );
+
+      if( flapPosition[flapId] <= flapMinLimit[flapId] ) 
+      {
+        flapPosition[flapId] = flapMinLimit[flapId];
+        if ( movementMethod  == FlapMovementType::EachFlapInSequence )
+            flapId--;//we do each flap fully, then the next by decrementing the flap id on completion. 
+      }
+
+      if( movementMethod == AllFlapsAtOnce )
+      {
+        for ( int i = flapCount ; i>= 0; i-- ) 
+          pwmController.setChannelPWM( i, pwmServo.pwmForAngle( flapPosition[ 0 ] - 90 ) );
+        flapId = 0; //reset here since we do all flaps together, using the position of the first. 
+      }
+      else 
+        pwmController.setChannelPWM( flapId, pwmServo.pwmForAngle( flapPosition[ flapId ] - 90 ) );
+
+      if( movementMethod == EachFlapIncremental )
+      {
+         flapId --;        
+      }
       restartTimer = true;
     }
   }
   else if ( targetCoverState == CoverStatus::Halted )
   {
     restartTimer = false;
-    digitalWrite( POWERPIN, RCPOWERPIN_OFF ); //turn power off
-    rcPowerOn = false;                 
-    coverState = CoverStatus::Halted;
+    setRCPower( RCPOWERPIN_OFF ); //turn power off
+    coverState = CoverStatus::Unknown;
+    targetCoverState = CoverStatus::Unknown;
   }
     
   if ( restartTimer ) 
-    ets_timer_arm_new( &rcTimer, 100, 0/*one-shot*/, 1);
+    ets_timer_arm_new( &rcTimer, MULTIFLAPTIME, 0/*one-shot*/, 1);
 }
+
+#else
+//With a single flap/single pin model, use single servo code for CCal. 
+//Timeout handler for myServo instance
+//Timer handler for 'soft' interrupt handler
+void onRCTimeoutTimer( void * pArg )
+{
+  bool restartTimer = false;
+  static int flapId = 0;
+  
+  flapId = (flapId + flapCount) % flapCount;
+  
+  debugV( "Updating cover servo - position %d", flapPosition[flapCount -1 ] );
+  if( targetCoverState == CoverStatus::Open )
+  {
+    if( flapPosition[ flapCount -1] >= flapMaxLimit[flapCount -1] )
+    {
+      coverState = CoverStatus::Open;
+      setRCPower( RCPOWERPIN_OFF ); //turn power on
+      flapId = flapCount - 1;
+      restartTimer = false;
+    } 
+    else 
+    {
+      if ( rcPowerOn != true )
+      {
+        setRCPower( RCPOWERPIN_ON ); //turn power on
+      }
+      flapPosition[ flapId ] += RCPOSITIONINCREMENT;
+      myServo.write( flapPosition[ flapId ] );
+      flapId++;
+      restartTimer = true;
+    }
+  }
+  else if ( targetCoverState == CoverStatus::Closed )
+  {
+    if ( flapPosition[0] <= flapMinLimit[ 0] )
+    {
+      setRCPower( RCPOWERPIN_OFF ); //turn power off
+      coverState = CoverStatus::Closed;
+      restartTimer = false;
+      flapId = 0;
+    }
+    else
+    {
+      if ( rcPowerOn != true )
+      {
+        setRCPower( RCPOWERPIN_ON ); //turn power on
+      }
+      flapPosition[ flapId ] -= RCPOSITIONINCREMENT;
+      myServo.write( flapPosition[ flapId ] );
+      flapId --;
+      restartTimer = true;
+    }
+  }
+  else if ( targetCoverState == CoverStatus::Halted )
+  {
+    setRCPower( RCPOWERPIN_OFF ); //turn power off
+    coverState = CoverStatus::Unknown;
+    targetCoverStatus = CoverStatus::Unknown;
+    restartTimer = false;
+  }
+    
+  if ( restartTimer ) 
+    ets_timer_arm_new( &rcTimer, RCFLAPTIME, 0/*one-shot*/, 1);
+}
+#endif 
 
 void onELTimeoutTimer(void * pArg)
 {
@@ -256,17 +384,18 @@ void setup_wifi()
   int zz = 0;
   WiFi.mode(WIFI_STA); 
   WiFi.hostname( myHostname );
-  WiFi.begin( ssid4, password4 );
-  Serial.print("Searching for WiFi..");
+  //WiFi.begin( ssid2, password2 );
+  WiFi.begin( ssid1, password1 );
+  Serial.print(F("Searching for WiFi.."));
   while (WiFi.status() != WL_CONNECTED) 
   {
     delay(500);
-      Serial.print(".");
+      Serial.print(F("."));
    if ( zz++ > 200 ) 
     device.restart();
   }
 
-  Serial.println("WiFi connected");
+  Serial.println(F("WiFi connected") );
   Serial.printf("SSID: %s, Signal strength %i dBm \n\r", WiFi.SSID().c_str(), WiFi.RSSI() );
   Serial.printf("Hostname: %s\n\r",      WiFi.hostname().c_str() );
   Serial.printf("IP address: %s\n\r",    WiFi.localIP().toString().c_str() );
@@ -274,8 +403,8 @@ void setup_wifi()
   Serial.printf("DNS address 1: %s\n\r", WiFi.dnsIP(1).toString().c_str() );
 
   //Setup sleep parameters
-  wifi_set_sleep_type(LIGHT_SLEEP_T);
-  //wifi_set_sleep_type(NONE_SLEEP_T);
+  //wifi_set_sleep_type(LIGHT_SLEEP_T);
+  wifi_set_sleep_type(NONE_SLEEP_T);
 
   delay(5000);
   Serial.println( "WiFi connected" );
@@ -284,119 +413,201 @@ void setup_wifi()
 void setup()
 {
   Serial.begin( 115200, SERIAL_8N1, SERIAL_TX_ONLY);
-  Serial.println(F("ESP starting."));
-
+  DEBUGSL1("ESP starting.");
+  DEBUGSL1( "ESP starting." );
+  String i2cMsg = "";
+  
+  delay(5000);
+  int i=0;
+  int j = 0 ;
+  
   //Start NTP client
   configTime(TZ_SEC, DST_SEC, timeServer1, timeServer2, timeServer3 );
   delay( 5000);
   
   //Setup default data structures
   DEBUGSL1("Setup EEprom variables"); 
-  EEPROM.begin( 4 + (2*MAX_NAME_LENGTH) + ( 10 * sizeof(int) ) );
-  //setDefaults();
+  EEPROM.begin( EEPROMSIZE );
   setupFromEeprom();
   DEBUGSL1("Setup eeprom variables complete."); 
   
   // Connect to wifi 
+  scanNet();
+  delay(2000);
   setup_wifi();                   
-  
+   
+#if !defined DEBUG_DISABLED
   //Debugging over telnet setup
   // Initialize the server (telnet or web socket) of RemoteDebug
   //Debug.begin(HOST_NAME, startingDebugLevel );
-  Debug.begin( WiFi.hostname().c_str(), Debug.ERROR ); 
-  Debug.setSerialEnabled(false);//until set false 
+  Debug.begin( WiFi.hostname().c_str(), Debug.VERBOSE ); 
+  Debug.setSerialEnabled(true);//until set false 
   // Options
   // Debug.setResetCmdEnabled(true); // Enable the reset command
   // Debug.showProfiler(true); // To show profiler - time between messages of Debug
   //In practice still need to use serial commands until debugger is up and running.. 
   debugE("Remote debugger enabled and operating");
+#endif //remote debug
 
+  //for use in debugging reset - may need to move 
+  Serial.printf( "Device reset reason: %s\n", device.getResetReason().c_str() );
+  Serial.printf( "device reset info: %s\n",   device.getResetInfo().c_str() );
+    
   //Open a connection to MQTT
-  DEBUGSL1("Setting up MQTT."); 
+  DEBUGSL1( ("Setting up MQTT.")); 
   client.setServer( mqtt_server, 1883 );
   client.connect( thisID, pubsubUserID, pubsubUserPwd ); 
+  String lastWillTopic = outHealthTopic; 
+  lastWillTopic.concat( myHostname );
+  client.connect( thisID, pubsubUserID, pubsubUserPwd, lastWillTopic.c_str(), 1, true, "Disconnected", false ); 
   //Create a heartbeat-based callback that causes this device to read the local i2C bus devices for data to publish.
   client.setCallback( callback );
   client.subscribe( inTopic );
   publishHealth();
-    
-  debugI("Setting up RC controls");
+  DEBUGSL1( ("MQTT Setup complete."));   
+
+
+  debugI("Setting up RC controls\n");
+  
+  //Set the PWM power pin to a known output type and state. 
+  pinMode( POWERPIN, OUTPUT );
+  digitalWrite( RCPIN, 0 );
+  
+  //Use Tx to control EL brightness via PWM (0-1023) if present. 
+  debugI("Setting up EL panel controls ");
+  pinMode( ELPIN, OUTPUT); //For this to be useful need to disable SERIAL port and use Tx on esp8266-01
+  analogWrite( ELPIN, 0); 
+  DEBUG_ESP("Setting up EL panel controls complete\n");
   
   //Pins mode and direction setup for i2c on ESP8266-01
+#if defined USE_SERVO_PCA9685 // i2c driven multiple servo case
+  debugI("Setting up multi-servo I2C controls");
+  Wire.begin( 2, 0 );//was 0, 2 for normal arrangement, trying 2, 0 for ASW02 : ESP8266-01
+  //Wire.begin( 5, 4 ); //ESP8266-012 testing GPIO 5 (SCL) is D1, GPIO 4 (SDA) is D2 on ESP8266-12 breakout normally. 
+  debugI("Setting up Wire pins complete\n");
+  
+  Wire.setClock(400000 );//100KHz target rate
+  DEBUG_ESP("Setting up Wire bus speed complete\n");
+  
+  DEBUG_ESP("Scanning I2C bus for devices\n");
+  scanI2CBus();
+  DEBUG_ESP("Setting up Wire complete\n");
+     
+  debugI("Setting up PWM controller \n");
+  pwmController.resetDevices();       // Resets all PCA9685 devices on i2c line
+  pwmController.init(PCA9685_OutputDriverMode::PCA9685_OutputDriverMode_TotemPole,
+                     PCA9685_OutputEnabledMode::PCA9685_OutputEnabledMode_Normal,
+                     PCA9685_OutputDisabledMode::PCA9685_OutputDisabledMode_Low,
+                     PCA9685_ChannelUpdateMode::PCA9685_ChannelUpdateMode_AfterStop,
+                     PCA9685_PhaseBalancer::PCA9685_PhaseBalancer_None);
+
+  //pwmController.init();             // Initializes module using default totem-pole driver mode, and default disabled phase balancer
+  pwmController.setPWMFreqServo();    // Set PWM freq to 50Hz 
+  
+  //drive all flaps to stored positions for 'closed'
+  for( i=0; i < flapCount; i++ )
+  {
+      DEBUG_ESP("PWM [%d] Initial value read as %0d \n", i, pwmController.getChannelPWM(i) ); 
+      DEBUG_ESP("PWM [%d] Initial angle to set is %0d \n", i, flapMinLimit[ i ] ); 
+      pwmController.setChannelPWM( i, pwmServo.pwmForAngle( flapMinLimit[ i ] - 90 ));
+      DEBUG_ESP("PWM [%d] value set and read back as %0d \n", i, pwmController.getChannelPWM(i) ); 
+      delay(20); 
+  }
+
+  //Test to see whether we can use the OE pin or need a power transistor to do the job... 
+  setRCPower( RCPOWERPIN_OFF );
+  DEBUG_ESP("Set up i2c PWM controller complete\n");
+ 
+#else //single servo only supported using a dedicated ESP8266 pin
+  DEBUG_ESP("Setting up single pin servo controls\n");
   //RC pulse pin
   pinMode( RCPIN, OUTPUT);
   digitalWrite( RCPIN, 0 );
   myServo.attach(RCPIN);  // attaches the servo on RCPIN to the servo object
   
   //Drives the RC pulse timing to keep the RC servo in position
-  myServo.write( rcPosition );//rcPosition is setup from the Eeprom setup. 
-  
+  //Position is read from the Eeprom setup. 
+  myServo.write( flapPosition[0] );
+
   //This pin controls the state of the power to the RC servo. Low is ON
   pinMode( POWERPIN, OUTPUT );
-  digitalWrite( POWERPIN, RCPOWERPIN_OFF );
-  rcPowerOn = false;
+  setRCPower( RCPOWERPIN_OFF );
+  DEBUG_ESP("Setting up single pin servo controls complete\n");
+#endif  
   
-  //Use to control EL brightness via PWM (0-1023) if present. 
-  pinMode( ELPIN, OUTPUT);
-  analogWrite( ELPIN, 0); 
-   
-  //Setup webserver handler functions
-  
+  DEBUG_ESP("Setting up to test servo \n");
+  testServo();
+  debugI("Test servo complete\n");
+
+  //Leave the servo power off until required.
+  setRCPower( RCPOWERPIN_OFF );
+
+  //Setup webserver handler functions 
   //Common ASCOM handlers
-  server.on("/api/v1/covercalibrator/0/action",              HTTP_PUT, handleAction );
-  server.on("/api/v1/covercalibrator/0/commandblind",        HTTP_PUT, handleCommandBlind );
-  server.on("/api/v1/covercalibrator/0/commandbool",         HTTP_PUT, handleCommandBool );
-  server.on("/api/v1/covercalibrator/0/commandstring",       HTTP_PUT, handleCommandString );
-  server.on("/api/v1/covercalibrator/0/connected",           handleConnected );
-  server.on("/api/v1/covercalibrator/0/description",         HTTP_GET, handleDescriptionGet );
-  server.on("/api/v1/covercalibrator/0/driverinfo",          HTTP_GET, handleDriverInfoGet );
-  server.on("/api/v1/covercalibrator/0/driverversion",       HTTP_GET, handleDriverVersionGet );
-  server.on("/api/v1/covercalibrator/0/interfaceversion",    HTTP_GET, handleInterfaceVersionGet );
-  server.on("/api/v1/covercalibrator/0/name",                HTTP_GET, handleNameGet );
-  server.on("/api/v1/covercalibrator/0/supportedactions",    HTTP_GET, handleSupportedActionsGet );
+  server.on(F("/api/v1/covercalibrator/0/action"),              HTTP_PUT, handleAction );
+  server.on(F("/api/v1/covercalibrator/0/commandblind"),        HTTP_PUT, handleCommandBlind );
+  server.on(F("/api/v1/covercalibrator/0/commandbool"),         HTTP_PUT, handleCommandBool );
+  server.on(F("/api/v1/covercalibrator/0/commandstring"),       HTTP_PUT, handleCommandString );
+  server.on(F("/api/v1/covercalibrator/0/connected"),           handleConnected );
+  server.on(F("/api/v1/covercalibrator/0/description"),         HTTP_GET, handleDescriptionGet );
+  server.on(F("/api/v1/covercalibrator/0/driverinfo"),          HTTP_GET, handleDriverInfoGet );
+  server.on(F("/api/v1/covercalibrator/0/driverversion"),       HTTP_GET, handleDriverVersionGet );
+  server.on(F("/api/v1/covercalibrator/0/interfaceversion"),    HTTP_GET, handleInterfaceVersionGet );
+  server.on(F("/api/v1/covercalibrator/0/name"),                HTTP_GET, handleNameGet );
+  server.on(F("/api/v1/covercalibrator/0/supportedactions"),    HTTP_GET, handleSupportedActionsGet );
 
 //CoverCalibrator-specific functions
 //Properties - all GET
-  server.on("/api/v1/covercalibrator/0/brightness",          HTTP_GET, handlerBrightnessGet );  
-  server.on("/api/v1/covercalibrator/0/maxbrightness",       HTTP_GET, handlerMaxBrightnessGet );
-  server.on("/api/v1/covercalibrator/0/coverstate",          HTTP_GET, handlerCoverStateGet );
-  server.on("/api/v1/covercalibrator/0/calibratorstate",     HTTP_GET, handlerCalibratorStateGet );
+  server.on(F("/api/v1/covercalibrator/0/brightness"),          HTTP_GET, handlerBrightnessGet );  
+  server.on(F("/api/v1/covercalibrator/0/maxbrightness"),       HTTP_GET, handlerMaxBrightnessGet );
+  server.on(F("/api/v1/covercalibrator/0/coverstate"),          HTTP_GET, handlerCoverStateGet );
+  server.on(F("/api/v1/covercalibrator/0/calibratorstate"),     HTTP_GET, handlerCalibratorStateGet );
 
 //Methods
-  server.on("/api/v1/covercalibrator/0/calibratoron",        HTTP_PUT, handlerCalibratorOnPut );
-  server.on("/api/v1/covercalibrator/0/calibratoroff",       HTTP_PUT, handlerCalibratorOffPut );
-  server.on("/api/v1/covercalibrator/0/closecover",          HTTP_PUT, handlerCloseCoverPut );  
-  server.on("/api/v1/covercalibrator/0/haltcover",           HTTP_PUT, handlerHaltCoverPut );
-  server.on("/api/v1/covercalibrator/0/opencover",           HTTP_PUT, handlerOpenCoverPut );
+  server.on(F("/api/v1/covercalibrator/0/calibratoron"),        HTTP_PUT, handlerCalibratorOnPut );
+  server.on(F("/api/v1/covercalibrator/0/calibratoroff"),       HTTP_PUT, handlerCalibratorOffPut );
+  server.on(F("/api/v1/covercalibrator/0/closecover"),          HTTP_PUT, handlerCloseCoverPut );  
+  server.on(F("/api/v1/covercalibrator/0/haltcover"),           HTTP_PUT, handlerHaltCoverPut );
+  server.on(F("/api/v1/covercalibrator/0/opencover"),           HTTP_PUT, handlerOpenCoverPut );
 
-//Additional non-ASCOM custom setup calls
-  server.on("/api/v1/covercalibrator/0/setup",      HTTP_GET, handlerSetup );
-  server.on("/setup",                               HTTP_GET, handlerSetup );
-  server.on("/status",                              HTTP_GET, handlerStatus);
-  server.on("/restart",                             HTTP_ANY, handlerRestart);
-  server.on("/setup/brightness" ,                   HTTP_ANY, handlerSetBrightness );//todo
-  server.on("/setup/hostname" ,                     HTTP_ANY, handlerStatus );
-  server.on("/setup/udpport",                       HTTP_ANY, handlerStatus );//todo
-  server.on("/setup/limits",                        HTTP_ANY, handlerSetLimits );
+//Additional ASCOM ALPACA Management setup calls
+  //Per device
+  //TODO - split whole device setup from per-instance driver setup e.g. hostname, alpaca port to device compared to ccal setup on the driver, 
+  server.on(F("/setup"),                               HTTP_GET, handlerDeviceSetup );
+  server.on(F("/setup/hostname") ,                     HTTP_ANY, handlerDeviceHostname );
+  server.on(F("/setup/udpport"),                       HTTP_ANY, handlerDeviceUdpPort );
+  server.on(F("/setup/location"),                      HTTP_ANY, handlerDeviceLocation );
+  
+  //Per driver - there may be several on this device. 
+  server.on(F("/setup/v1/covercalibrator/0/setup"),            HTTP_GET, handlerDriver0Setup );
+  server.on(F("/setup/v1/covercalibrator/0/setup/brightness"), HTTP_ANY, handlerDriver0Brightness );
+  server.on(F("/setup/v1/covercalibrator/0/setup/positions"),  HTTP_ANY, handlerDriver0Positions );
+  server.on(F("/setup/v1/covercalibrator/0/setup/position"),   HTTP_ANY, handlerDriver0Positions );
+  server.on(F("/setup/v1/covercalibrator/0/setup/flapcount"),  HTTP_ANY, handlerDriver0FlapCount );
+  server.on(F("/setup/v1/covercalibrator/0/setup/limits"),     HTTP_ANY, handlerDriver0Limits );
+  
+//Custom
+  server.on(F("/status"),                              HTTP_GET, handlerStatus);
+  server.on(F("/restart"),                             HTTP_ANY, handlerRestart); 
 
 //Management interface calls.
 /* ALPACA Management and setup interfaces
- * The main browser setup URL would be http://192.168.1.89:7843/setup
+ * The main browser setup URL would be http://<hostname>/api/v1/setup 192.168.1.89:7843/setup
  * The JSON list of supported interface versions would be available through a GET to http://192.168.1.89:7843/management/apiversions
  * The JSON list of configured ASCOM devices would be available through a GET to http://192.168.1.89:7843/management/v1/configureddevices
  */
-  //Management API
-  server.on("/management/description",              HTTP_GET, handleMgmtDescription );
-  server.on("/management/apiversions",              HTTP_GET, handleMgmtVersions );
-  server.on("/management/v1/configuredevices",     HTTP_GET, handleMgmtConfiguredDevices );
+  //Management API - https://www.ascom-standards.org/api/?urls.primaryName=ASCOM%20Alpaca%20Management%20API#/Management%20Interface%20(JSON)
+  server.on(F("/management/apiversions"),             HTTP_GET, handleMgmtVersions );
+  server.on(F("/management/v1/description"),          HTTP_GET, handleMgmtDescription );
+  server.on(F("/management/v1/configureddevices"),     HTTP_GET, handleMgmtConfiguredDevices );
   
   //Basic settings
-  server.on("/", handlerStatus );
+  server.on(F("/"), handlerStatus );
   server.onNotFound(handlerNotFound); 
 
   updater.setup( &server );
   server.begin();
-  debugI("Web server handlers setup & started");
+  debugI("Web server handlers setup & started\n");
   
   //Starts the discovery responder server
   Udp.begin( udpPort );
@@ -415,7 +626,7 @@ void setup()
   ets_timer_setfn( &rcTimer, onRCTimeoutTimer, NULL ); 
   
   //fire loop function handler timer every 1000 msec
-  ets_timer_arm_new( &timer, 1000, 1 /*repeat*/, 1);
+  ets_timer_arm_new( &timer, 125, 1 /*repeat*/, 1);
 
   //Supports the MQTT async reconnect timer. Armed elsewhere.
   //ets_timer_arm_new( &timeoutTimer, 2500, 0/*one-shot*/, 1);
@@ -423,15 +634,15 @@ void setup()
   //Supports the calibrator lamp warm up sequence. Armed elsewhere
   //ets_timer_arm_new( &timeoutTimer, 10000, 0/*one-shot*/, 1);
 
-  //set the startup position  
-  myServo.write( rcPosition );
-  //Leave the servo power off though 
-  digitalWrite ( POWERPIN, RCPOWERPIN_OFF );
-
   //baseline driver variables
  
-  debugI( "Setup complete" );
-  Debug.setSerialEnabled(true); 
+  debugI( "Setup complete\n" );
+
+#if !defined DEBUG_ESP   
+//turn off serial debug if we are not actively debugging.
+//use telnet access for remote debugging
+   Debug.setSerialEnabled(false); 
+#endif
 }
 
 //Main processing loop
@@ -439,27 +650,23 @@ void loop()
 {
   String timestamp;
   String output;
-  static int pos = rcMinLimit;
   
   if( newDataFlag == true ) 
   {
+    if( coverState == CoverStatus::Moving )
+      debugV( "cover position : flap 0 at %d", flapPosition[0]); 
+    
     //do some work
 #ifndef _TEST_RC_
     manageCoverState( targetCoverState );
     manageCalibratorState ( targetCalibratorState );
 #else
     //Test servo
-    pos = pos + 5;
-    if ( pos >= rcMaxLimit )
-    {
-      pos = rcMinLimit;
-      debugI( "reset pos to minLimit" ); 
-    }
-    debugI( "Writing position %i to pin %d", pos, RCPIN );
-    myServo.write( pos );
-    
-    delay(5);  
+    testServo();
 #endif
+    //Handle web requests
+    server.handleClient();
+
     newDataFlag = false;
   }
     
@@ -478,18 +685,17 @@ void loop()
     reconnectNB();
     client.subscribe (inTopic);
   }
-  client.loop();
-  
-  //Handle web requests
-  server.handleClient();
+  client.loop(); 
 
   //Handle Alpaca requests
   handleManagement();
   
+#if !defined DEBUG_DISABLED
   // Remote debug over WiFi
   Debug.handle();
   // Or
   //debugHandle(); // Equal to SerialDebug  
+#endif
 }
 
  //Function to manage cover states
@@ -498,144 +704,140 @@ void loop()
   String msg = "";
   ///enum CoverStatus = {NotPresent, Closed, Moving, Open, Unknown, Error, Halted };
   //need a targetState.
-  debugI( "current state is %s, targetState is %s", coverStatusCh[coverState], coverStatusCh[targetState] );
+  if ( coverState == targetState ) 
+    return 0;
+   
   switch( coverState )
   {          
-      case CoverStatus::NotPresent: 
-          debugW("Cover not present - why calling ?");
-          break;
+      //current status is Closed, new target status is asking for a different action. 
+      case CoverStatus::Closed:
+          switch (targetState)
+          {
+            //If we change these target states while moving, the timer will respond automatically
+            case CoverStatus::Open:
+                  debugD("targetState set to Open from Closed, actual position flap[0] is %d ", flapPosition[0] );
+                  debugV("Arming timer to move cover(s)");
+                  coverState = CoverStatus::Moving;
+                  //turn on the timer to move the servo smoothly
+                  ets_timer_arm_new( &rcTimer, RCFLAPTIME, 0/*one-shot*/, SERVO_START_TIME /*ms*/);      
+                  break;          
+            case CoverStatus::Halted:
+                  debugD("targetState set to Halted from Closed, actual position flap[0] is %d ", flapPosition[0] );
+                  if ( flapPosition[flapCount -1] <= flapMinLimit[ flapCount -1] )
+                  {
+                    coverState = CoverStatus::Closed;
+                    debugI("targetState updated to Closed due to position while halted");
+                  }
+                  else 
+                    coverState = CoverStatus::Unknown;                    
+                  break;
+            case CoverStatus::Closed:
+                  debugD("targetState set to Closed from Closed, actual position flap[0] is %d ", flapPosition[0] );
+                  break;//Quietly ignore. 
+            case CoverStatus::Moving:
+            case CoverStatus::Unknown:
+            case CoverStatus::Error:
+            default:
+                  debugW("Requested target state of %s while Closed - does it make sense ?", coverStatusCh[targetState] ); 
+                  break;
+          }
+          break;      
+
       case CoverStatus::Moving:
           //current status is moving, new target status is asking for a different action. 
           switch (targetState)
           {
-            //If we change these target states while moving, the timer will respond automatically
+            //If we change these target states while moving, the timer handler managing movement will respond automatically
             case CoverStatus::Closed:
             case CoverStatus::Open:
-                  debugI("Still moving  - %s to %s", coverStatusCh[coverState], coverStatusCh[targetState] );
+                  debugD("Still moving  - %s to %s", coverStatusCh[coverState], coverStatusCh[targetState] );
                   break;
             case CoverStatus::Halted:
                   //Let timer elapse and turn power off
-                  debugI( "Change of state requested from Moving to Halted - letting timer elapse");
+                  debugD( "Change of state requested from Moving to Halted - letting timer elapse");
                   break;
+            case CoverStatus::Unknown:
+            case CoverStatus::Error:
+                  if( flapPosition[flapCount -1 ] > flapMinLimit[ flapCount -1] )
+                    coverState = CoverStatus::Open;
+                  break;
+            case CoverStatus::NotPresent: 
             default:
                   debugW("Requested target state of %s while moving - does it make sense ?", coverStatusCh[targetState] ); 
                   break;
           }
           break;
-      case CoverStatus::Halted:
+      //Used to be Halted but Halted is not an ASCOM value - unknown should be returned as the state when the flap is halted during movement or before initialised
+      case CoverStatus::Unknown: 
           switch( targetState )
           {
-            case CoverStatus::Halted:
-                 debugI( "Requested targetState of 'Halted' when already Halted. Nothing to do.");
-                 break;
             case CoverStatus::Closed:
-                 debugI("targetState changed to Closed from Halted. Starting motion timer");
-                 if ( rcPosition > rcMinLimit ) 
-                 {
-                    coverState = CoverStatus::Moving;
-                    digitalWrite( POWERPIN, RCPOWERPIN_ON ); //turn power on
-                    rcPowerOn = true;     
-                    //turn on the timer to move the servo smoothly
-                    ets_timer_arm_new( &rcTimer, 200, 0/*one-shot*/, 1 /*ms*/);      
-                 }
+                 debugD("targetState changed to Closed from Unknown. Starting motion timer");
+                 coverState = CoverStatus::Moving;
+                 //turn on the timer to move the servo smoothly
+                 ets_timer_arm_new( &rcTimer, RCFLAPTIME, 0/*one-shot*/, SERVO_START_TIME /*ms*/);      
                  break;
             case CoverStatus::Open:
-                 debugI("targetState changed to Open from Halted. Starting motion timer");
-                 if ( rcPosition < rcMaxLimit ) 
-                 {
-                    coverState = CoverStatus::Moving;
-                    digitalWrite( POWERPIN, RCPOWERPIN_ON ); //turn power on
-                    rcPowerOn = true;     
-                    //turn on the timer to move the servo smoothly
-                    ets_timer_arm_new( &rcTimer, 200, 0/*one-shot*/, 1 /*ms*/);      
-                 }
+                 debugD("targetState changed to Open from Unknown. Starting motion timer");
+                 coverState = CoverStatus::Moving;
+                 //turn on the timer to move the servo smoothly
+                 ets_timer_arm_new( &rcTimer, RCFLAPTIME, 0/*one-shot*/, SERVO_START_TIME /*ms*/);      
                  break;
             case CoverStatus::Moving:
+            case CoverStatus::Halted:            
+            case CoverStatus::Error:
             default:
-              debugW("unexpected targetState while Open");
+                 debugW("Unexpected targetState %s from Unknown", coverStatusCh[ targetState ] );
               break;
           }
           break;
       case CoverStatus::Open: 
           switch( targetState )
           {
-            case CoverStatus::Open:
-                 debugI( "Requested targetState of 'Open' when already open. Nothing to do.");
-                 break;
             case CoverStatus::Closed:
-                 if ( rcPosition > rcMinLimit ) 
-                 {
-                    coverState = CoverStatus::Moving;
-                    digitalWrite( POWERPIN, RCPOWERPIN_ON ); //turn power on
-                    rcPowerOn = true;     
-                    //turn on the timer to move the servo smoothly
-                    ets_timer_arm_new( &rcTimer, 200, 0/*one-shot*/, 1 /*ms*/);      
-                 }
-                 else 
-                 {
-                    coverState = CoverStatus::Closed;
-                    //ensure power is off
-                    digitalWrite( POWERPIN, RCPOWERPIN_OFF ); //turn power off
-                    rcPowerOn = false;     
-                 }
-                 break;
-            case CoverStatus::Halted:
-              //State will inform active timer - let it lapse.
-              debugI("targetState changed to Halted from Moving. Waiting for motion timer");
+              debugD("targetState set to Closed from Open, actual position flap[0] is %d ", flapPosition[0] );
+              coverState = CoverStatus::Moving;
+              //turn on the timer to move the servo smoothly
+              ets_timer_arm_new( &rcTimer, RCFLAPTIME, 0/*one-shot*/, SERVO_INC_TIME /*ms*/);      
               break;
+            case CoverStatus::Halted:
+              debugD("targetState set to Halted from Open, actual position flap[0] is %d ", flapPosition[0] );
+              if ( flapPosition[ flapCount -1 ] >= flapMaxLimit[ flapCount -1 ] )
+              {
+                coverState = CoverStatus::Open;
+                debugI("targetState updated to Open due to position while halted");
+              }                    
+              else 
+              {
+                debugI("targetState changed to Unknown from Open. ");
+                coverState = CoverStatus::Unknown;
+                targetCoverState = Unknown;
+              }            
+              break;
+            case CoverStatus::Open:
+              debugD("targetState set to Open from Open, actual position flap[0] is %d ", flapPosition[0] );
+              break;//Quietly ignore. 
             case CoverStatus::Moving:
+            case CoverStatus::Unknown:
+            case CoverStatus::Error:
             default:
-              debugW("unexpected targetState while Open");
+              debugW("unexpected targetState from Open %s", coverStatusCh[targetState]);
               break;
           }
           break;
-      case CoverStatus::Closed:
-          //current status is Closed, new target status is asking for a different action. 
-          switch (targetState)
-          {
-            //If we change these target states while moving, the timer will respond automatically
-            case CoverStatus::Closed:
-                  //nothing to do 
-                  debugI("targetState set to Closed while Closed - nothing to do");
-                  break;
-            case CoverStatus::Open:
-                  debugI("targetState set to Open from Closed");
-                   if ( rcPosition < rcMaxLimit ) 
-                   {
-                      debugD("Arming timer to open cover from Closed");
-                      coverState = CoverStatus::Moving;
-                      digitalWrite( POWERPIN, RCPOWERPIN_ON ); //turn power on
-                      rcPowerOn = true;     
-                      //turn on the timer to move the servo smoothly
-                      ets_timer_arm_new( &rcTimer, 200, 0/*one-shot*/, 1 /*ms*/);      
-                   }
-                  break;          
-            case CoverStatus::Halted:
-                  debugI("targetState set to Halted from Closed");
-                  if ( rcPosition <= rcMinLimit )
-                  {
-                    coverState = Closed;
-                    debugI("targetState updated to Closed due to position while halted");
-                  }                    
-                  break;
-            default:
-                  debugW("Requested target state of %s while Closed - does it make sense ?", coverStatusCh[targetState] ); 
-                  break;
-          }
-          break;
-      case CoverStatus::Unknown:
       case CoverStatus::Error:
           switch ( targetCoverState )
           {
             case CoverStatus::Open:
             case CoverStatus::Closed:
-              debugI("Requested targetState of %s from %s - setting Halted first", coverStatusCh[coverState], coverStatusCh[targetCoverState] );
-              //Let the coverState be updated to halted and then next iteration will move.  
+              debugD("Requested targetState of %s from %s - setting Halted first", coverStatusCh[coverState], coverStatusCh[targetCoverState] );
+              //turn on the timer to move the servo smoothly
+              ets_timer_arm_new( &rcTimer, RCFLAPTIME, 0/*one-shot*/, SERVO_INC_TIME /*ms*/);      
               break;
             case CoverStatus::Halted:
-              digitalWrite( POWERPIN, RCPOWERPIN_OFF ); //turn power off
-              rcPowerOn = false;                   
-              coverState = CoverStatus::Halted;
+              setRCPower( RCPOWERPIN_OFF ); //turn power off
+              coverState = CoverStatus::Unknown;
+              targetCoverState = CoverStatus::Unknown;
               break;
             case CoverStatus::NotPresent:            
             case CoverStatus::Unknown:
@@ -648,14 +850,15 @@ void loop()
         break;
   }
   
-  debugI( "Exiting - final state %s, targetState %s ", coverStatusCh[coverState], coverStatusCh[targetCoverState] );
+  //debugD( "Exiting - final state %s, targetState %s ", coverStatusCh[coverState], coverStatusCh[targetCoverState] );
   return 0;
 }
 
  int manageCalibratorState( CalibratorStatus calibratorTargetState )
  {
-     
-    debugI( "Entered - current state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
+    if ( calibratorState == calibratorTargetState ) 
+      return 0; 
+    //debugI( "Entered - current state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
     switch ( calibratorState )
     {
       case CalibratorStatus::CalNotPresent:
@@ -684,7 +887,7 @@ void loop()
               debugV("Ignoring intermediate target state requested - from NotReady to %s", calibratorStatusCh[calibratorTargetState] );
               break;
           case Ready:
-              //Get here while we are waiting for the current state to become READY - brightness may be changedin the meantime.
+              //Get here while we are waiting for the current state to become READY - brightness may be changed in the meantime.
               if( brightnessChanged )
               {
                 //we have a new brightness. 
@@ -698,8 +901,10 @@ void loop()
                break;
           case Off:
               //turn off              
-              //adjust brightness to be zero or just use brightness to record current requested setting when on ?
+              //adjust brightness to be zero or just use brightness to record current requested setting when on ? API says use 
               analogWrite( ELPIN, 0 ); 
+              brightness = 0;
+              brightnessChanged = false;              
               calibratorState = CalibratorStatus::Off;
               break; 
           case CalibratorStatus::CalError:
@@ -758,6 +963,7 @@ void loop()
                 analogWrite( ELPIN, brightness );
                 //Turn on timer for illuminator to stabilise
                 ets_timer_arm_new( &ELTimer, 5000, 0/*one-shot*/, 1);
+                //targetCalibratorState = CalibratorStatus::Ready; //already set
                 calibratorState = NotReady;
                 brightnessChanged = false;
                 debugI( "Lamp changed while already on - setting new brightness");
@@ -835,7 +1041,7 @@ void loop()
         debugE( "Unknown calibrator state on entry! %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
         break;
     }
-  debugI( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );        
+  //debugI( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );        
   return 0;
  }
  
@@ -879,9 +1085,13 @@ void callback(char* topic, byte* payload, unsigned int length)
   outTopic = outHealthTopic;
   outTopic.concat( myHostname );
   if ( client.publish( outTopic.c_str(), output.c_str(), true ) )
+  {
     debugI( "topic: %s, published with value %s \n", outTopic.c_str(), output.c_str() );
+  }
   else
+  {
     debugW( "Failed to publish : %s to %s", output.c_str(), outTopic.c_str() );
+  }
  }
  
  //Publish state to the function subscription point. 
@@ -897,7 +1107,7 @@ void callback(char* topic, byte* payload, unsigned int length)
   //publish to our device topic(s)
   DynamicJsonBuffer jsonBuffer(256);
   JsonObject& root = jsonBuffer.createObject();
-  root["Time"] = timestamp;
+  root[F("Time")] = timestamp;
   root["hostname"] = myHostname;
   root["coverState"] = coverState;
   root["calibratorState"] = calibratorState;
@@ -911,8 +1121,59 @@ void callback(char* topic, byte* payload, unsigned int length)
   outTopic.concat( DriverType );
   
   if ( client.publish( outTopic.c_str(), output.c_str(), true ) )
+  {
     debugI( "topic: %s, published with value %s \n", outTopic.c_str(), output.c_str() );
+  }
   else
+  {
     debugW( "Failed to publish : %s to %s", output.c_str(), outTopic.c_str() );
+  }
  }
+
+//Wrapped into a function to allow us to isolate this for different behaviours under PCA9865 and direct to dedicated servo
+ void setRCPower( bool powerState )
+ {
+#if defined USE_PCA9865
+//powerpin maps to the pin used to control the /OE pin on the PCA9865
+  //digitalWrite( POWERPIN, powerState );
+#else
+//powerpin maps to the io pin used to power the base or gate of the transistor providing power to the servo 
+  //digitalWrite( POWERPIN, powerState );
+#endif
+  //update our record. 
+  rcPowerOn = powerState;
+ }
+
+//#define TEST_SERVO_PCA9685
+ void testServo(void)
+ {
+  int i = 0, j = 0;
+
+  setRCPower( RCPOWERPIN_ON );
+  delay( 500);
+  setRCPower( RCPOWERPIN_OFF );
+  delay( 500);
+  setRCPower( RCPOWERPIN_ON );
+  delay( 500);
+  setRCPower( RCPOWERPIN_OFF );
+  delay( 500);
  
+#if defined TEST_SERVO_PCA9685
+  debugI("Testing PCA9685 servo controller ");
+  setRCPower( RCPOWERPIN_ON );
+  for ( i=0; i< flapCount ; i++ )
+  {
+      for ( j= 30; j< 160; j+= 5 ) 
+      {
+         Serial.printf( "channel[%d] set to %d\n", i, j );
+         pwmController.setChannelPWM(  i, pwmServo.pwmForAngle( j - 90 ) );
+         delay(20);
+      }
+  }
+  setRCPower( RCPOWERPIN_OFF );
+  debugI("Servo testing complete "); 
+#else //test the single servo pin case. 
+  //TODO
+  ;
+#endif
+ }

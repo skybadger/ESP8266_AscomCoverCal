@@ -1,99 +1,72 @@
 
 Echo "Testing driver info "
-curl espasw01.i-badger.co.uk
+curl espacc01.i-badger.co.uk
 
 REM "Connecting "
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&connected=true" "http://espasw01/api/v1/switch/0/connected"
+curl -X PUT -d "ClientID=99&ClientTransactionID=123&connected=true" "http://espacc01/api/v1/covercalibrator/0/connected"
 timeout /t 2
 
 echo "Testing basic driver information"
-curl "http://espasw01/api/v1/switch/0/connected?ClientID=99&ClientTransactionID=123"
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/description?ClientID=99&ClientTransactionID=123"
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/driverinfo?ClientID=99&ClientTransactionID=123" 
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/name?ClientID=99&ClientTransactionID=123"
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/driverversion?ClientID=99&ClientTransactionID=123"
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/interfaceversion?ClientID=99&ClientTransactionID=123"
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/supportedactions?ClientID=99&ClientTransactionID=123"
-timeout /t 2
+REM curl "http://espacc01/api/v1/covercalibrator/0/connected?ClientID=99&ClientTransactionID=123"
+REM timeout /t 2
+REM curl "http://espacc01/api/v1/covercalibrator/0/description?ClientID=99&ClientTransactionID=123"
+REM timeout /t 2
+REM curl "http://espacc01/api/v1/covercalibrator/0/driverinfo?ClientID=99&ClientTransactionID=123" 
+REM timeout /t 2
+REM curl "http://espacc01/api/v1/covercalibrator/0/name?ClientID=99&ClientTransactionID=123"
+REM timeout /t 2
+REM curl "http://espacc01/api/v1/covercalibrator/0/driverversion?ClientID=99&ClientTransactionID=123"
+REM timeout /t 2
+REM curl "http://espacc01/api/v1/covercalibrator/0/interfaceversion?ClientID=99&ClientTransactionID=123"
+REM timeout /t 2
+REM curl "http://espacc01/api/v1/covercalibrator/0/supportedactions?ClientID=99&ClientTransactionID=123"
+REM timeout /t 2
 
 Echo "Testing Custom actions"
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&thing=123" "http://espasw01/api/v1/switch/0/action"
-timeout /t 2
-curl -X PUT -d "ClientID=99&ClientTransactionID=123" "http://espasw01/api/v1/switch/0/commandblind"
-timeout /t 2
-curl -X PUT -d "ClientID=99&ClientTransactionID=123" "http://espasw01/api/v1/switch/0/commandbool"
-timeout /t 2
-curl -X PUT -d "ClientID=99&ClientTransactionID=123" "http://espasw01/api/v1/switch/0/commandstring"
-timeout /t 2
+REM curl -X PUT -d "ClientID=99&ClientTransactionID=123&thing=123" "http://espacc01/api/v1/covercalibrator/0/action"
+REM timeout /t 2
+REM curl -X PUT -d "ClientID=99&ClientTransactionID=123" "http://espacc01/api/v1/covercalibrator/0/commandblind"
+REM timeout /t 2
+REM curl -X PUT -d "ClientID=99&ClientTransactionID=123" "http://espacc01/api/v1/covercalibrator/0/commandbool"
+REM timeout /t 2
+REM curl -X PUT -d "ClientID=99&ClientTransactionID=123" "http://espacc01/api/v1/covercalibrator/0/commandstring"
+REM timeout /t 2
 
-ECHO "Testing switch get statements"
-curl "http://espasw01/api/v1/switch/0/maxswitch?ClientID=99&ClientTransactionID=123"
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/canwrite?ClientID=99&ClientTransactionID=123&Id=0"
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/canwrite?ClientID=99&ClientTransactionID=123&Id=8"
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/getswitchdescription?ClientID=99&ClientTransactionID=123&Id=2" 
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/getswitch?ClientID=99&ClientTransactionID=123&Id=2" 
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/getswitch?ClientID=99&ClientTransactionID=123&Id=8" 
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/getswitchname?ClientID=99&ClientTransactionID=123&Id=2" 
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/getswitchvalue?ClientID=99&ClientTransactionID=123&Id=2" 
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/minswitchvalue?ClientID=99&ClientTransactionID=123&Id=2" 
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/maxswitchvalue?ClientID=99&ClientTransactionID=123&Id=2" 
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/switchstep?ClientID=99&ClientTransactionID=123&Id=2" 
-timeout /t 2
+ECHO "Testing covercalibrator GET statements"
+REM curl "http://espacc01/api/v1/covercalibrator/0/brightness?ClientID=99&ClientTransactionID=123"
+REM timeout /t 2
 
-curl "http://espasw01/api/v1/switch/0/name?ClientID=99&ClientTransactionID=123"
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/driverversion?ClientID=99&ClientTransactionID=123"
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/interfaceversion?ClientID=99&ClientTransactionID=123"
-timeout /t 2
-curl "http://espasw01/api/v1/switch/0/supportedactions?ClientID=99&ClientTransactionID=123"
-timeout /t 2
+REM curl "http://espacc01/api/v1/covercalibrator/0/maxbrightness?ClientID=99&ClientTransactionID=123"
+REM timeout /t 2
+
+REM curl "http://espacc01/api/v1/covercalibrator/0/coverstate?ClientID=99&ClientTransactionID=123"
+REM timeout /t 2
+
+REM curl "http://espacc01/api/v1/covercalibrator/0/calibratorstate?ClientID=99&ClientTransactionID=123"
+REM timeout /t 2
+
 
 ECHO "Testing put statements"
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=0&state=true" "http://espasw01/api/v1/switch/0/setswitch"
-timeout /t 2
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=0&state=true" "http://espasw01/api/v1/switch/0/setswitch"
-timeout /t 2
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=0&state=false" "http://espasw01/api/v1/switch/0/setswitch"
-timeout /t 2
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=1&state=false" "http://espasw01/api/v1/switch/0/setswitch"
-timeout /t 2
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=2&state=false" "http://espasw01/api/v1/switch/0/setswitch"
-timeout /t 2
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=7&state=false" "http://espasw01/api/v1/switch/0/setswitch"
-timeout /t 2
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=9&state=false" "http://espasw01/api/v1/switch/0/setswitch"
-timeout /t 2
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=7&name='fabulous switch' "http://espasw01/api/v1/switch/0/setswitchname"
+REM curl -X PUT -d "ClientID=99&ClientTransactionID=123&brightness=123" "http://espacc01/api/v1/covercalibrator/0/calibratoron"
+REM timeout /t 2
+
+REM curl -X PUT -d "ClientID=99&ClientTransactionID=123" "http://espacc01/api/v1/covercalibrator/0/calibratoroff"
+REM timeout /t 2
+
+curl -X PUT -d "ClientID=99&ClientTransactionID=123" "http://espacc01/api/v1/covercalibrator/0/closecover"
+timeout /t 5
+
+curl -X PUT -d "ClientID=99&ClientTransactionID=123" "http://espacc01/api/v1/covercalibrator/0/haltcover"
 timeout /t 2
 
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=7&value=0.0" "http://espasw01/api/v1/switch/0/setswitchvalue"
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=7&value=0.5" "http://espasw01/api/v1/switch/0/setswitchvalue"
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=7&value=1.5" "http://espasw01/api/v1/switch/0/setswitchvalue"
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=7&state=true" "http://espasw01/api/v1/switch/0/setswitch"
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=3&state=true" "http://espasw01/api/v1/switch/0/setswitch"
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=2&state=true" "http://espasw01/api/v1/switch/0/setswitch"
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=1&state=true" "http://espasw01/api/v1/switch/0/setswitch"
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=0&state=true" "http://espasw01/api/v1/switch/0/setswitch"
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=0&state=false" "http://espasw01/api/v1/switch/0/setswitch"
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=0&state=true" "http://espasw01/api/v1/switch/0/setswitch"
-curl -X PUT -d "ClientID=99&ClientTransactionID=123&Id=1&state=true" "http://espasw01/api/v1/switch/0/setswitch"
+curl -X PUT -d "ClientID=99&ClientTransactionID=123" "http://espacc01/api/v1/covercalibrator/0/opencover"
+timeout /t 5
+
+REM "disconnecting"
+curl -X PUT -d "ClientID=99&ClientTransactionID=123&connected=false" "http://espacc01/api/v1/covercalibrator/0/connected"
+timeout /t 2
+
+pause
 
 REM still to be tested
 REM Non-ascom - yet to be tested 
