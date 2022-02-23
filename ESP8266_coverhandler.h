@@ -1,5 +1,3 @@
-
-
 #ifndef _ESP8266_COVERCAL_H_
 #define _ESP8266_COVERCAL_H_
 
@@ -7,6 +5,8 @@
 #include <Wire.h>
 #include "AlpacaErrorConsts.h"
 //#include "ASCOMAPICCal_rest.h"
+
+extern void setRCPower ( boolean );
 
 //Function definitions
 bool getUriField( char* inString, int searchIndex, String& outRef );
@@ -200,20 +200,21 @@ void handlerCalibratorOnPut(void)
       if( input >= 0 && input <= MAXDIGITALVALUE )
       {
         debugD( "New brightness requested: %i", input );          
+        brightnessChanged = false;
         switch ( calibratorState )
         {
           case CalibratorStatus::CalNotPresent:
             errCode = notImplemented;
             errMsg = "Calibrator not present";            
             break; 
-          case CalibratorStatus::Off:
-          case CalibratorStatus::NotReady:
           case CalibratorStatus::Ready:
+          case CalibratorStatus::NotReady: //already in the proces of turning on
+            brightnessChanged = true;
+            brightness = input;
+          case CalibratorStatus::Off:
           case CalibratorStatus::CalUnknown:
           case CalibratorStatus::CalError:
-            brightness = input;
-            brightnessChanged = true;
-            targetCalibratorState = CalibratorStatus::Ready;
+            targetCalibratorState = CalibratorStatus::Ready;                      
             errCode = Success;
             errMsg = "";
             break; 
@@ -266,8 +267,8 @@ void handlerCalibratorOffPut(void)
     {
       debugD( "New state requested: %s", "off" );
       targetCalibratorState = CalibratorStatus::Off;
-      brightnessChanged = true;
-      brightness = 0;
+      brightnessChanged = false;
+      //don't change brightness until actual 'offing' happens
       errMsg = "";
       errCode = 0;
     }
@@ -282,8 +283,7 @@ void handlerCalibratorOffPut(void)
     JsonObject& root = jsonBuffer.createObject();
     jsonResponseBuilder( root, clientID, transID, ++serverTransID, F("handlerCalibratorOffPut"), errCode, errMsg );      
     root.printTo(message);
-
-    
+  
     server.send(returnCode, F("application/json"), message);
     return;
 }
@@ -451,6 +451,7 @@ void handlerRestart( void)
   server.sendHeader( WiFi.hostname().c_str(), String("/status"), true);
   server.send ( 302, F("text/html"), F("<!Doctype html><html>Redirecting for restart</html>"));
   debugI("Reboot requested");
+  setRCPower( RCPOWERPIN_OFF );
   device.restart();
 }
 
@@ -929,15 +930,18 @@ void handlerDriver0FlapCount(void)
         {
           newBrightness  = ( int ) server.arg( argToSearchFor[0] ).toInt();         
           newState = server.arg( argToSearchFor[1] );
-          //Potentially we could set the min/max limits either way around - ie reverse the direction of closure. 
-          if ( newState.equalsIgnoreCase("On") )
+      
+          if ( newState.equalsIgnoreCase("On") )//turn on or already on
           {
-            if( newBrightness != -1 && newBrightness >= 0 && newBrightness <= MAXDIGITALVALUE )
-            {
-              brightness = newBrightness ;
-              brightnessChanged = true;
-              targetCalibratorState = CalibratorStatus::Ready;
-              saveToEeprom();
+            if ( newBrightness >= 0 && newBrightness <= MAXDIGITALVALUE) 
+            { 
+              brightness = newBrightness;
+              //If its already on - flag a brightness change rather than state change
+              if(  calibratorState == Ready || calibratorState == NotReady )
+              {
+                brightnessChanged = true;
+              }
+              targetCalibratorState = CalibratorStatus::Ready;             
               returnCode = 200;    
             }
             else
@@ -948,16 +952,16 @@ void handlerDriver0FlapCount(void)
           }
           else if ( newState.equalsIgnoreCase("Off") )
           {
-              brightness = 0 ;
-              brightnessChanged = true;
+              //set later //brightness = 0 ;
+              //its a state change 
+              brightnessChanged = false;
               targetCalibratorState = CalibratorStatus::Off;
-              saveToEeprom();
               returnCode = 200;               
           }
           else
           {
               returnCode = 200;               
-              err = "No valid calibrator state for method";
+              err = "Not a valid calibrator target state for method";
           }
         }
         else
@@ -1073,18 +1077,23 @@ void handlerDriver0FlapCount(void)
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     setupFormBuilderHeader( message );      
     server.send( returnCode, "text/html", message ); 
+    message = "";
     
     setupFormBuilderDriver0Header( message, err );      
     server.sendContent( message );
+    message = "";
     
     setupFormBuilderDriver0Limits( message );            
     server.sendContent( message );
+    message = "";
     
     setupFormBuilderDriver0Positions( message );            
     server.sendContent( message );
+    message = "";
 
     setupFormBuilderDriver0Brightness( message );            
     server.sendContent( message );
+    message = "";
     
     setupFormBuilderFooter( message );
     server.sendContent( message );
@@ -1241,11 +1250,13 @@ String& setupFormBuilderDeviceStrings( String& htmlForm )
   htmlForm += F("<div class=\"col-sm-12\">");
   htmlForm += F("<p>This device supports the <a href=\"placeholder\">ALPACA UDP discovery API</a> on port: ");
   htmlForm.concat( udpPort);
+  
+  //Links to setup pages for each implemented driver
   htmlForm += F("</p> <p> This device implements drivers with driver IDs : <ul><li>");
   //TODO - handle multiple GUIDs for multiple devices. 
   htmlForm.concat( GUID );
-  htmlForm += F("</li></ul></p>");
-  htmlForm += F("<p>Click <a href=\"/setup/v1/covercalibrator/0/setup\">here </a> to setup the CoverCalibrator</p> </div></div>");
+  htmlForm += F(" <a href=\"/setup/v1/covercalibrator/0/setup\"> setup cover 0 </a>");
+  htmlForm += F("</li></ul></p></div></div>");
   
   htmlForm += "<div class=\"row\" id=\"discovery-port\" >";
   htmlForm += "<div class=\"col-sm-12\"><h2> Enter new Discovery port number for device</h2>";
@@ -1257,7 +1268,7 @@ String& setupFormBuilderDeviceStrings( String& htmlForm )
   htmlForm += "value=\"";
   htmlForm.concat( udpPort );
   htmlForm += "\"/>";
-  htmlForm += "<input type=\"submit\" value=\"Set port#\" />";
+  htmlForm += "<input type=\"submit\" value=\"Set port\" />";
   htmlForm += "</form></div></div>"; 
   
   //Device settings - hostname 
@@ -1355,7 +1366,7 @@ DEBUGSL1( htmlForm.c_str() );
     local.concat( i );
     local += "\">Switch [";
     local.concat( i );  
-    local.concat( "]: Closed limit: \&amp; </label>");
+    local.concat( "]: Closed limit: &nbsp; </label>");
     local += "<input type=\"number\" size=\"6\" maxlength=\"6\"  name=\"minLimit";
     local.concat( i ); 
     local += "\" min=\"";
@@ -1369,7 +1380,7 @@ DEBUGSL1( htmlForm.c_str() );
     //Update the max swing limit ( open ) 
     local += "<label for=\"maxLimit";
     local.concat( i ); 
-    local += "\" >\&amp; Opening limit: </label>"; 
+    local += "\" >&nbsp; Opening limit: </label>"; 
 
     local += "<input type=\"number\" size=\"6\" name=\"maxLimit";
     local.concat( i ); 
@@ -1502,14 +1513,15 @@ String& setupFormBuilderDriver0Brightness( String& htmlForm )
   htmlForm += F("\" max=\"");
   htmlForm.concat( MAXDIGITALVALUE );
   htmlForm += F("\" value=\"");
-  htmlForm.concat( brightness );
+  htmlForm.concat( String( brightness ) );
   htmlForm += F("\"/><br> ");
 
   //Turn on or off the calibrator lamp. 
   htmlForm += "<input type=\"radio\" id=\"calibrator1\" name=\"calibratorstate\" value=\"On\">";
-  htmlForm += "<label for=\"calibrator1\">Turn on Calibrator</label><br>";
+  htmlForm += "<label for=\"calibrator1\">&nbsp; Turn on Calibrator</label><br>";
+  
   htmlForm += "<input type=\"radio\" id=\"calibrator2\" name=\"calibratorstate\" value=\"Off\">";
-  htmlForm += "<label for=\"calibrator2\">Turn off calibrator</label><br>";
+  htmlForm += "<label for=\"calibrator2\">&nbsp; Turn off calibrator</label><br>";
   htmlForm += "</div>"; //form-group
   
   htmlForm += F("<input type=\"submit\" class=\"btn btn-default\" value=\"Set Calibrator state\" />");

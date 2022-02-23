@@ -10,17 +10,17 @@ The setup allows specifying:
   The UDP management interface listening port. 
 
 This device assumes the use of ESP8266 devices to implement. 
-Using an ESP8266-01 this leaves one pin free to be a digital device. 
-Using an ESP8266-12 this leaves a number of pins free to be a digital device.
+Using an ESP8266_01 this leaves one pin free to be a digital device. 
+Using an ESP8266_12 this leaves a number of pins free to be a digital device.
 
  To do:
  Debug, trial
  
  Layout: 
- (ESP8266-12)
+ (ESP8266_12)
  GPIO 4,2 to SDA
  GPIO 5,0 to SCL 
- (ESP8266-01)
+ (ESP8266_01)
  GPIO 0 - SDA
  GPIO 1 - Rx - re-use as PWM output for testing purposes
  GPIO 2 - SCL
@@ -32,13 +32,25 @@ Using an ESP8266-12 this leaves a number of pins free to be a digital device.
 #ifndef _COVERCAL_COMMON_H_
 #define _COVERCAL_COMMON_H_
 
+//Define the processor
+#define ESP8266_01
+
+#define DEBUG
+//Enables basic debugging statements for ESP
+#define DEBUG_ESP_MH       
+
+//engage the servo test routine in place of normal loop handling 
+//#define TEST_SERVO
+
 //Manage the remote debug interface, it takes 6K of memory with all the strings even when not in use but loaded
-//
 //#define DEBUG_DISABLED //Check the impact on the serial interface. 
 
 //#define DEBUG_DISABLE_AUTO_FUNC    //Turn on or off the auto function labelling feature .
 #define WEBSOCKET_DISABLED true      //No impact to memory requirement
 #define MAX_TIME_INACTIVE 0          //to turn off the de-activation of the debug telnet session
+
+//Use for client testing
+//#define DEBUG_MQTT            //enable low-level MQTT connection debugging statements.    
 
 #include "DebugSerial.h"
 //Remote debugging setup 
@@ -47,21 +59,18 @@ Using an ESP8266-12 this leaves a number of pins free to be a digital device.
 
 //Define this to enable use of the PWM servo breakout multiple-servo interface for multi-leaf covers. 
 //Otherwise it dedicates a single pin to manage a single servo
-#define USE_SERVO_PCA9685 
+//#define USE_SERVO_PCA9685 
 
-//Define this to put the device in continual looping servo test mode
-//#define _TEST_RC_  
+#if defined USE_SERVO_PCA9685
+#define MAX_SERVOS 16
+#else 
+#define MAX_SERVOS 1
+#endif
 
 //Time between Servo motion change request to start after chnage of request state
 #define SERVO_INC_TIME 5
 
-//Use for client testing
-//#define DEBUG_MQTT            //enable low-level MQTT connection debugging statements.    
-
-const char* defaultHostname = "espACC00";
-
 const int MAX_NAME_LENGTH = 40;
-#define MAX_SERVOS 16
 #define EEPROMSIZE ( 4 + (2*MAX_NAME_LENGTH) + ( MAX_SERVOS * 2 * sizeof(int) ) + 4 * sizeof(int) ) //bytes: UDP port, brightness, flapcount
 
 #define ASCOM_DEVICE_TYPE "covercalibrator" //used in server handler uris
@@ -77,10 +86,17 @@ const String DriverVersion = "0.0.1";
 const String DriverInfo = "Skybadger.ESPCoverCal RESTful native device. ";
 const String Description = "Skybadger ESP2866-based wireless ASCOM Cover-calibrator device";
 const String InterfaceVersion = "1.1";
-const String DriverType = "CoverCalibrator"; //Must be a ASCOM type to be recognised by UDP discovery. 
+const String DriverType = "CoverCalibrator"; //Must be a valid ASCOM type to be recognised by UDP discovery. 
+
 //char GUID[] = "0012-0000-0000-0000";//prototype
-//char GUID[] = "0012-0000-0000-0001";//Hi-power single servo instance
-char GUID[] = "0012-0000-0000-0002";//PCA_9685 standard multi-servo instance 
+//const char* defaultHostname = "espACC01";
+//char GUID[] = "0012-0000-0000-0001";//Hi-power 8V single servo instance: servo power control, servo PWM directly provided, illuminator/heater PWM
+
+const char* defaultHostname = "espACC02";
+char GUID[] = "0012-0000-0000-0002";//6v single servo instance: servo power control, servo PWM directly provided, illuminator/heater PWM
+
+//const char* defaultHostname = "espACC03";
+//char GUID[] = "0012-0000-0000-0003";//PCA_9685 standard multi-servo instance: multi-servo on i2c, illuminator/heater PWM 
 
 const int defaultInstanceNumber = 0;
 
@@ -129,12 +145,18 @@ enum FlapMovementType { EachFlapInSequence, EachFlapIncremental, AllFlapsAtOnce 
 enum FlapMovementType movementMethod = FlapMovementType::EachFlapInSequence;
 
 //Populate from eeprom
-int flapCount = 1; 
+#if defined USE_SERVO_PCA9685
+int flapCount = 6; 
+#else
+int flapCount = 1;
+#endif
+ 
 int* flapMinLimit = nullptr;
 int* flapMaxLimit = nullptr;
 int* flapPosition = nullptr;
 
-bool rcPowerOn = false;//Turn on power output transistor - provides power to the servo 
+//Turn on power output transistor - provides power to the servo 
+bool rcPowerOn = false;
 
 //Returns the current calibrator brightness in the range 0 (completely off) to MaxBrightness (fully on)
 int brightness;         
@@ -156,7 +178,10 @@ enum CalibratorStatus targetCalibratorState = Off ;
 #define TZ_SEC          ((TZ)*3600)
 #define DST_SEC         ((DST_MN)*60)
 
-#define RCPOWERPIN_ON  ((bool)true )
+//define this to cause logic low to enable power. Typically used for PNP voltage sources.
+//applies to both RCPIN and ELPIN 
+#define REVERSE_POWER_LOGIC
+#define RCPOWERPIN_ON  ((bool) true )
 #define RCPOWERPIN_OFF ((bool) false )
 
 const int MINPIN = 1; //device specific
@@ -164,53 +189,60 @@ const int MAXPIN = 16; //device specific
 const int MAXDIGITALVALUE = 1023; //PWM limit
 const int NULLPIN = 0; 
 
-#if defined ESP8266-01
-//GPIO 0 is I2C SCL pin 3, so it depends on whether you use i2c or not.
-//GPIO 1 is Serial tx pin 5
-//GPIO 2 is I2C SDA pin 2
-//GPIO 3 is Rx pin 1 
-//Guess that just leaves nothing
-const int pinMap[] = {NULLPIN}; 
+#if defined ESP8266_01
+//Verified experimentally
+//GPIO 0 is I2C SCL      - pin 2
+//GPIO 1 is Tx Serial    - pin 5
+//GPIO 2 is I2C SDA      - pin 3
+//GPIO 3 is Rx Serial    - pin 1 
 
-//Multi-servo handling case for 1-16 flaps means we need the i2c bus and then have two pins left - one for Rx and one for Tx. 
-//Still need a high current servo power feed control and still need an ELPanel PWM control
-//So we lose Tx and Rx. Means the board starts to look different than before since the wiring has changed. 
 #if defined USE_SERVO_PCA9685
+//Multi-servo handling case for 1-16 flaps means we need the i2c bus and then have two pins left - one for Rx and one for Tx. 
+//Still need a high current servo power feed control and still need an ELPanel or heater PWM control
+//So we lose Rx and maybe Rx. Means the board starts to look different than before since the wiring has changed. 
+
 //Pin assignments
-const int POWERPIN = 3; //Rx is GPIO 3 on pin 0 - controls OE. 
-const int RCPIN = 0;    //SDA IS GPIO 0 on pin 1
-const int ELPIN = 3;    //ELPIN is GPIO 1 on pin5 (Tx) If you have an EL Panel - this to enable it but loses Tx serial. 
-const int SCLPIN = 2;   //SCL is GPIO 2 on pin2  
+const int RCPIN = 2;    //SCL is GPIO 2 on pin 2  
+const int SCLPIN = 0;   //SDA IS GPIO 0 on pin 3
+const int RCPOWERPIN = 1; //Tx is GPIO 1 on pin 5 - controls /OE for i2c servo board. Need to disable Serial for this
+const int ELPIN = 3;    //ELPIN is GPIO 3 on pin 1 (Rx) If you have an EL Panel or a heater - this is to control it. 
+const int pinMap[] = {NULLPIN}; 
 
 #else //Single-servo direct pin control case. 
 //Pin assignments
-const int POWERPIN = 3; //Rx - pin 0
-const int RCPIN = 0;    //SDA, pin 1
-const int ELPIN = 2;    // If you have an EL Panel - use this to enable it or PWM control it. . 
-const int SCLPIN = 2;   //SCL is GPIO 2 on pin2  
+const int RCPOWERPIN = 0; //Servo power pin 2
+const int RCPIN = 3;    //servo PWM signal Rx - pin 1, 
+const int SCLPIN = 1;   //Available for Tx  - serial can be enabled until used for something else... 
+const int ELPIN = 2;    // If you have an EL Panel or heater - use this to PWM control it. . 
+
+const int pinMap[] = {1, NULLPIN}; 
 #endif //servo types
 
-#elif defined ESP8266-12
-//Most pins are used for flash, so we assume those for SSI are available.
-//Typically use 4 and 5 for I2C, leaves 
-const int pinMap[] = { 2, 14, 12, 13, 15};
+#elif defined ESP8266_12
 
 //Multi-servo handling case for 1-16 flaps means we need the i2c bus but have more pins left than just Rx/Tx. 
 //Need a high current servo power feed control and an ELPanel PWM control
 //So we pick a pin from the spare pin list 
 #if defined USE_SERVO_PCA9685
 //Pin assignments
-const int POWERPIN = 12; //
+const int RCPOWERPIN = 12; //
 const int RCPIN = 4;    //SDA 
 const int ELPIN = 13;    //
 const int SCLPIN = 5;   //SCL 
+//Most pins are used for flash, so we assume those for SSI are available.
+//Typically use 4 and 5 for I2C, leaves 
+const int pinMap[] = { 2, 14, 13, 15, NULLPIN };
 
 #else //Single-servo direct pin control case. don;t need i2c but have more sprate pins to choose from  .
 //Pin assignments
-const int POWERPIN = 12; //Rx
+const int RCPOWERPIN = 12; //Rx
 const int RCPIN = 4;     //SDA
 const int ELPIN = 13;    // If you have an EL Panel - use this to enable it or PWM control it. . 
 const int SCLPIN = 5;    //SCL 
+//Most pins are used for flash, so we assume those for SSI are available.
+//Typically use 4 and 5 for I2C, leaves 
+const int pinMap[] = { 2, 14, 15, NULLPIN };
+
 #endif //servo types
 
 #else 

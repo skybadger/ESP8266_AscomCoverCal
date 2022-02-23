@@ -1,8 +1,14 @@
 /*
  Program to implement ASCOM ALPACA Cover Calibrator interface for remote telescope flip-flat devices. 
- Typically implemented using REST calls over wireless to talk to the device and the device controls a RC servo via power switching throughexternal hardware.
+ Typically implemented using REST calls over wireless to talk to the device. 
+ In the single servo version, the device controls a RC servo via PNP power switching through external hardware and a heater through a similar circuit
  Power control in this case is through a p-channel mosfet where the source is wired to 12v and drain is the output. Taking gate to low will turn on the drain output. 
- This means we can move the RC serv to the desired position and thhen turn it off to hold it in that position. 
+ This means we can move the RC serv to the desired position and then turn it off to hold it in that position. 
+
+ In the multi-servo version, used for a telescope with multiple flaps that need to open to uncover the lens, this circuit requires a PCA9685 servo controller attached via I2C. 
+ Un-comment the USE_SERVO_PCA9685 define to enable the multi-servo case. 
+ Both versions use the heater 
+ 
  Supports web interface on port 80 returning json string
  
 Notes: 
@@ -15,13 +21,13 @@ Notes:
  Complete EEPROM calls - done.
  
  Pin Layout:
- ESP8266-01e
+ ESP8266_01e
  GPIO 3 (Rx) Used to control power to servo using PNP poweer mosfet.
  GPIO 2 (SDA) to PWM RC signal 
  GPIO 0 (SCL) Used to control illuminator using PWM via PNP power mosfet. 
  GPIO 1 used as Serial Tx. 
  
- ESP8266-12
+ ESP8266_12
  GPIO 4,2 to SDA
  GPIO 5,0 to SCL 
  All 3.3v logic. 
@@ -52,13 +58,16 @@ Change Log
 04/01/2022 Updated HTML to set limits, positions and brightness
            Updated HTML to add reset and update cmmmands to device setup
            Updated GUID to recognise this device  
-           Added ability to set which method of opening flaps is used - enum created. Set at compile time unless a REST call is added.         
+           Added ability to set which method of opening flaps is used - enum created. Set at compile time unless a REST call is added.     
+ 
+30/01/2022 Added PNP output transistor to board for 6-flap cover using Rx as control. POtential conflict with 
+           other boards already using Tx. Need to check. 
+           Updated setBrightness function from html pages to properly check for brightness control 
+           Probably neeed to spluit turn on/off from setBrightness handler & presentation
+           replaced &amp; with &nbsp; as intended. 
+            
+ 
  */
-//#define _TEST_RC_ //Enable simple RC servo testing. 
-#define ESP8266_01
-#define DEBUG
-//Enables basic debugging statements for ESP
-#define DEBUG_ESP_MH               
 
 #include "CoverCal_common.h"
 #include "AlpacaErrorConsts.h"
@@ -95,6 +104,7 @@ PCA9685 pwmController; //( B1000000, Wire, 100000 );//Base address, i2c interfac
 // Linearly interpolates between standard 2.5%/12.5% phase length (102/512) for -90°/+90°
 //Which means all servo values need to be adjusted from 0-180 range to -90/+90 range by subtracting 90
 PCA9685_ServoEval pwmServo;
+
 #else
 #include <Servo.h> //Arduino native servo library
 Servo myServo;  // create servo object to control a servo
@@ -124,7 +134,6 @@ char* thisID = nullptr;
 //Private variables for the driver
 bool elPresent = false;
 bool coverPresent = false; 
-int illuminatorPWM = 0;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -174,6 +183,10 @@ int manageCoverState( CoverStatus coverTargetState );
 
 //wrapper function used to control output power transistor for servo/PCA9865
 void setRCPower( bool powerState );
+void setSoloRCPosition(int value );
+
+//wrapper function used to control output power transistor for calibrator panel illumination
+void setELPower( int pwmSetting  );
 
 //Unit servo test function 
 void testServo();
@@ -314,16 +327,16 @@ void onRCTimeoutTimer( void * pArg )
   
   flapId = (flapId + flapCount) % flapCount;
   
-  debugV( "Updating cover servo - position %d", flapPosition[flapCount -1 ] );
+  debugV( "Updating cover servo %d - position %d", flapId, flapPosition[flapCount -1 ] );
   if( targetCoverState == CoverStatus::Open )
   {
     if( flapPosition[ flapCount -1] >= flapMaxLimit[flapCount -1] )
     {
       coverState = CoverStatus::Open;
-      setRCPower( RCPOWERPIN_OFF ); //turn power on
+      setRCPower( RCPOWERPIN_OFF ); //turn power off
       flapId = flapCount - 1;
       restartTimer = false;
-    } 
+    }
     else 
     {
       if ( rcPowerOn != true )
@@ -331,7 +344,7 @@ void onRCTimeoutTimer( void * pArg )
         setRCPower( RCPOWERPIN_ON ); //turn power on
       }
       flapPosition[ flapId ] += RCPOSITIONINCREMENT;
-      myServo.write( flapPosition[ flapId ] );
+      setSoloRCPosition( flapPosition[ flapId ] );
       flapId++;
       restartTimer = true;
     }
@@ -352,7 +365,7 @@ void onRCTimeoutTimer( void * pArg )
         setRCPower( RCPOWERPIN_ON ); //turn power on
       }
       flapPosition[ flapId ] -= RCPOSITIONINCREMENT;
-      myServo.write( flapPosition[ flapId ] );
+      setSoloRCPosition( flapPosition[ flapId ] );
       flapId --;
       restartTimer = true;
     }
@@ -361,7 +374,7 @@ void onRCTimeoutTimer( void * pArg )
   {
     setRCPower( RCPOWERPIN_OFF ); //turn power off
     coverState = CoverStatus::Unknown;
-    targetCoverStatus = CoverStatus::Unknown;
+    targetCoverState = CoverStatus::Unknown;
     restartTimer = false;
   }
     
@@ -375,47 +388,32 @@ void onELTimeoutTimer(void * pArg)
   ELTimeoutFlag = false;
   
   //Update our state from NOTREADY to READY
-  calibratorState       = CalibratorStatus::Ready;
+  if ( brightness == 0 ) 
+  {
+    calibratorState       = CalibratorStatus::Off;
+  }
+  else 
+    calibratorState       = CalibratorStatus::Ready;
+  
   targetCalibratorState = CalibratorStatus::Ready;
 }
 
-void setup_wifi()
+void setSoloRCPosition( int input )
 {
-  int zz = 0;
-  WiFi.mode(WIFI_STA); 
-  WiFi.hostname( myHostname );
-  //WiFi.begin( ssid2, password2 );
-  WiFi.begin( ssid1, password1 );
-  Serial.print(F("Searching for WiFi.."));
-  while (WiFi.status() != WL_CONNECTED) 
-  {
-    delay(500);
-      Serial.print(F("."));
-   if ( zz++ > 200 ) 
-    device.restart();
-  }
-
-  Serial.println(F("WiFi connected") );
-  Serial.printf("SSID: %s, Signal strength %i dBm \n\r", WiFi.SSID().c_str(), WiFi.RSSI() );
-  Serial.printf("Hostname: %s\n\r",      WiFi.hostname().c_str() );
-  Serial.printf("IP address: %s\n\r",    WiFi.localIP().toString().c_str() );
-  Serial.printf("DNS address 0: %s\n\r", WiFi.dnsIP(0).toString().c_str() );
-  Serial.printf("DNS address 1: %s\n\r", WiFi.dnsIP(1).toString().c_str() );
-
-  //Setup sleep parameters
-  //wifi_set_sleep_type(LIGHT_SLEEP_T);
-  wifi_set_sleep_type(NONE_SLEEP_T);
-
-  delay(5000);
-  Serial.println( "WiFi connected" );
+  myServo.write( input );
+  //analogWrite( RCPIN, map( input, 0 , 256, 0, 1024 )  );
 }
 
 void setup()
 {
-  Serial.begin( 115200, SERIAL_8N1, SERIAL_TX_ONLY);
-  DEBUGSL1("ESP starting.");
-  DEBUGSL1( "ESP starting." );
   String i2cMsg = "";
+
+#if !defined USE_SERVO_PCA9685 //uses all the pins including the serial pin. 
+  Serial.begin( 115200, SERIAL_8N1, SERIAL_TX_ONLY);
+#else
+  Serial.end();//https://www.arduino.cc/reference/en/language/functions/communication/serial/end/
+#endif 
+  DEBUG_ESP_MH("ESP starting.");
   
   delay(5000);
   int i=0;
@@ -439,7 +437,6 @@ void setup()
 #if !defined DEBUG_DISABLED
   //Debugging over telnet setup
   // Initialize the server (telnet or web socket) of RemoteDebug
-  //Debug.begin(HOST_NAME, startingDebugLevel );
   Debug.begin( WiFi.hostname().c_str(), Debug.VERBOSE ); 
   Debug.setSerialEnabled(true);//until set false 
   // Options
@@ -450,11 +447,11 @@ void setup()
 #endif //remote debug
 
   //for use in debugging reset - may need to move 
-  Serial.printf( "Device reset reason: %s\n", device.getResetReason().c_str() );
-  Serial.printf( "device reset info: %s\n",   device.getResetInfo().c_str() );
+  DEBUG_ESP_MH( "Device reset reason: %s\n", device.getResetReason().c_str() );
+  DEBUG_ESP_MH( "device reset info: %s\n",   device.getResetInfo().c_str() );
     
   //Open a connection to MQTT
-  DEBUGSL1( ("Setting up MQTT.")); 
+  DEBUG_ESP_MH( ("Setting up MQTT.")); 
   client.setServer( mqtt_server, 1883 );
   client.connect( thisID, pubsubUserID, pubsubUserPwd ); 
   String lastWillTopic = outHealthTopic; 
@@ -464,26 +461,25 @@ void setup()
   client.setCallback( callback );
   client.subscribe( inTopic );
   publishHealth();
-  DEBUGSL1( ("MQTT Setup complete."));   
-
+  DEBUG_ESP_MH( ("MQTT Setup complete."));   
 
   debugI("Setting up RC controls\n");
-  
-  //Set the PWM power pin to a known output type and state. 
-  pinMode( POWERPIN, OUTPUT );
-  digitalWrite( RCPIN, 0 );
-  
-  //Use Tx to control EL brightness via PWM (0-1023) if present. 
+   
+  //Use ELPIN to control EL brightness via PWM (0-1023) if present. 
+  //Assume the calibrator is present until we have a more sophisticated way of handlling this.
+  //common to both i2c and single servo operations. 
+  elPresent = true; 
+
   debugI("Setting up EL panel controls ");
-  pinMode( ELPIN, OUTPUT); //For this to be useful need to disable SERIAL port and use Tx on esp8266-01
-  analogWrite( ELPIN, 0); 
-  DEBUG_ESP("Setting up EL panel controls complete\n");
+  analogWriteFreq( 1000 );
+  setELPower( 0 ); 
+  DEBUG_ESP_MH("Setting up EL panel controls complete\n");
   
-  //Pins mode and direction setup for i2c on ESP8266-01
+  //Pins mode and direction setup for i2c on ESP8266_01
 #if defined USE_SERVO_PCA9685 // i2c driven multiple servo case
   debugI("Setting up multi-servo I2C controls");
-  Wire.begin( 2, 0 );//was 0, 2 for normal arrangement, trying 2, 0 for ASW02 : ESP8266-01
-  //Wire.begin( 5, 4 ); //ESP8266-012 testing GPIO 5 (SCL) is D1, GPIO 4 (SDA) is D2 on ESP8266-12 breakout normally. 
+  Wire.begin( 2, 0 );//was 0, 2 for normal arrangement, trying 2, 0 for ASW02 : ESP8266_01
+  //Wire.begin( 5, 4 ); //ESP8266_012 testing GPIO 5 (SCL) is D1, GPIO 4 (SDA) is D2 on ESP8266_12 breakout normally. 
   debugI("Setting up Wire pins complete\n");
   
   Wire.setClock(400000 );//100KHz target rate
@@ -493,6 +489,7 @@ void setup()
   scanI2CBus();
   DEBUG_ESP("Setting up Wire complete\n");
      
+  //Assume present until we can do some sensible detection of device - parse i2cbus response for found address for example. 
   debugI("Setting up PWM controller \n");
   pwmController.resetDevices();       // Resets all PCA9685 devices on i2c line
   pwmController.init(PCA9685_OutputDriverMode::PCA9685_OutputDriverMode_TotemPole,
@@ -507,40 +504,41 @@ void setup()
   //drive all flaps to stored positions for 'closed'
   for( i=0; i < flapCount; i++ )
   {
-      DEBUG_ESP("PWM [%d] Initial value read as %0d \n", i, pwmController.getChannelPWM(i) ); 
-      DEBUG_ESP("PWM [%d] Initial angle to set is %0d \n", i, flapMinLimit[ i ] ); 
+      DEBUG_ESP_MH("PWM [%d] Initial value read as %0d \n", i, pwmController.getChannelPWM(i) ); 
+      DEBUG_ESP_MH("PWM [%d] Initial angle to set is %0d \n", i, flapMinLimit[ i ] ); 
       pwmController.setChannelPWM( i, pwmServo.pwmForAngle( flapMinLimit[ i ] - 90 ));
-      DEBUG_ESP("PWM [%d] value set and read back as %0d \n", i, pwmController.getChannelPWM(i) ); 
+      DEBUG_ESP_MH("PWM [%d] value set and read back as %0d \n", i, pwmController.getChannelPWM(i) ); 
       delay(20); 
   }
 
   //Test to see whether we can use the OE pin or need a power transistor to do the job... 
+  //Use RCRCPOWERPIN to control OE pin on PCA9685
   setRCPower( RCPOWERPIN_OFF );
-  DEBUG_ESP("Set up i2c PWM controller complete\n");
- 
+  DEBUG_ESP_MH("Set up i2c Servo controller complete\n");
+   
 #else //single servo only supported using a dedicated ESP8266 pin
-  DEBUG_ESP("Setting up single pin servo controls\n");
+  DEBUG_ESP_MH("Setting up single pin servo controls\n");
+  //This pin controls the state of the power supply to the RC servo.
+  pinMode( RCPOWERPIN, OUTPUT );
+  setRCPower( RCPOWERPIN_ON );
+
   //RC pulse pin
-  pinMode( RCPIN, OUTPUT);
-  digitalWrite( RCPIN, 0 );
-  myServo.attach(RCPIN);  // attaches the servo on RCPIN to the servo object
-  
+  myServo.attach( RCPIN );  // attaches the servo on RCPIN to the servo object 
   //Drives the RC pulse timing to keep the RC servo in position
   //Position is read from the Eeprom setup. 
-  myServo.write( flapPosition[0] );
-
-  //This pin controls the state of the power to the RC servo. Low is ON
-  pinMode( POWERPIN, OUTPUT );
+  setSoloRCPosition( flapPosition[0] ); 
+  delay(1000);
   setRCPower( RCPOWERPIN_OFF );
-  DEBUG_ESP("Setting up single pin servo controls complete\n");
+
+  DEBUG_ESP_MH("Setting up single pin servo controls complete\n");
+
 #endif  
   
-  DEBUG_ESP("Setting up to test servo \n");
+#if defined TEST_SERVO   
+  DEBUG_ESP("testing servo(s) \n");
   testServo();
   debugI("Test servo complete\n");
-
-  //Leave the servo power off until required.
-  setRCPower( RCPOWERPIN_OFF );
+#endif 
 
   //Setup webserver handler functions 
   //Common ASCOM handlers
@@ -625,20 +623,20 @@ void setup()
   //Timer for RC Servo flap opener/closer motion
   ets_timer_setfn( &rcTimer, onRCTimeoutTimer, NULL ); 
   
-  //fire loop function handler timer every 1000 msec
-  ets_timer_arm_new( &timer, 125, 1 /*repeat*/, 1);
+  //fire loop function handler timer every xx msec
+  ets_timer_arm_new( &timer, 250, 1 /*repeat*/, 1);
 
   //Supports the MQTT async reconnect timer. Armed elsewhere.
   //ets_timer_arm_new( &timeoutTimer, 2500, 0/*one-shot*/, 1);
   
   //Supports the calibrator lamp warm up sequence. Armed elsewhere
-  //ets_timer_arm_new( &timeoutTimer, 10000, 0/*one-shot*/, 1);
+  //ets_timer_arm_new( &ELTimer, 10000, 0/*one-shot*/, 1);
 
   //baseline driver variables
  
   debugI( "Setup complete\n" );
 
-#if !defined DEBUG_ESP   
+#if !defined DEBUG_ESP_MH && !defined DEBUG_DISABLE
 //turn off serial debug if we are not actively debugging.
 //use telnet access for remote debugging
    Debug.setSerialEnabled(false); 
@@ -657,13 +655,17 @@ void loop()
       debugV( "cover position : flap 0 at %d", flapPosition[0]); 
     
     //do some work
-#ifndef _TEST_RC_
-    manageCoverState( targetCoverState );
-    manageCalibratorState ( targetCalibratorState );
-#else
+#if defined TEST_SERVO
     //Test servo
     testServo();
+#else
+    if ( coverPresent ) 
+      manageCoverState( targetCoverState );
+    
+    if ( elPresent ) 
+      manageCalibratorState ( targetCalibratorState );
 #endif
+
     //Handle web requests
     server.handleClient();
 
@@ -856,9 +858,10 @@ void loop()
 
  int manageCalibratorState( CalibratorStatus calibratorTargetState )
  {
-    if ( calibratorState == calibratorTargetState ) 
-      return 0; 
-    //debugI( "Entered - current state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
+    //if ( calibratorState == calibratorTargetState ) 
+    //  return 0; 
+    
+    debugV( "Entered - current state %s, target State %s, brightness %i", calibratorStatusCh[(int) calibratorState], calibratorStatusCh[(int) calibratorTargetState], brightness );
     switch ( calibratorState )
     {
       case CalibratorStatus::CalNotPresent:
@@ -874,7 +877,6 @@ void loop()
             debugW("Asked to do something when calibrator not present");
             break;          
         }
-        debugV( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
         break; 
       case CalibratorStatus::NotReady:
         switch (calibratorTargetState)
@@ -892,9 +894,11 @@ void loop()
               {
                 //we have a new brightness. 
                 //turn on to desired brightness - this is different from setting to off/0. 
-                analogWrite( ELPIN, brightness );
+                setELPower( brightness );
+                ets_timer_arm_new( &ELTimer, 5000, 0/*one-shot*/, 1);
                 brightnessChanged = false;
                 debugI( "Brightness changed (%d) while warming up lamp - set new brightness", brightness);
+                //leave current state of not ready alone. 
               }
               else
                 debugV("Waiting for timer to move to Ready");
@@ -902,8 +906,7 @@ void loop()
           case Off:
               //turn off              
               //adjust brightness to be zero or just use brightness to record current requested setting when on ? API says use 
-              analogWrite( ELPIN, 0 ); 
-              brightness = 0;
+              setELPower( brightness = 0 ); 
               brightnessChanged = false;              
               calibratorState = CalibratorStatus::Off;
               break; 
@@ -913,7 +916,6 @@ void loop()
             debugW("targetstate invalid : %s", calibratorStatusCh[calibratorTargetState] );
             break;          
         }    
-        debugV( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
         break;
       case CalibratorStatus::Off:
         switch (calibratorTargetState)
@@ -926,7 +928,7 @@ void loop()
               break;
           case CalibratorStatus::Ready:      
              //turn on to desired brightness
-             analogWrite( ELPIN, brightness );
+             setELPower( brightness );
              //Turn on timer for illuminator to stabilise
              ets_timer_arm_new( &ELTimer, 5000, 0/*one-shot*/, 1);
              //update state to waiting
@@ -943,7 +945,6 @@ void loop()
             debugW("targetstates invalid : %s", calibratorStatusCh[calibratorTargetState]);
             break;          
         }
-        debugV( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
         break;
 
       case CalibratorStatus::Ready:      
@@ -953,14 +954,15 @@ void loop()
               debugW("targetState invalid - trying to set NotPresent from Ready");
               break;
           case CalibratorStatus::NotReady:
-              //Waiting for timer completion.
+              //Waiting for timer completion - not a valid target state
+              debugW("targetState invalid - trying to set NotReady from Ready");
               break;
           case CalibratorStatus::Ready:  
-              //Already on - leave alone.
+              //Already on - leave on, manage changing brightness
               if( brightnessChanged )
               {
                 debugD( "Arming (0) timer to turn on lamp" ); 
-                analogWrite( ELPIN, brightness );
+                setELPower( brightness );
                 //Turn on timer for illuminator to stabilise
                 ets_timer_arm_new( &ELTimer, 5000, 0/*one-shot*/, 1);
                 //targetCalibratorState = CalibratorStatus::Ready; //already set
@@ -974,27 +976,26 @@ void loop()
           case CalibratorStatus::Off:
           case CalibratorStatus::CalError:
               //Turn off 
-              analogWrite( ELPIN, 0 );
-              calibratorState = Off;
+              setELPower( brightness = 0 );
+              calibratorState = CalibratorStatus::Off;
               break;
           case CalibratorStatus::CalUnknown:
           default:
               debugD("targetState invalid - trying to move from Unknown to %s", calibratorStatusCh[calibratorTargetState]  );
             break;          
         }
-        debugV( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] ); 
         break;
       case CalibratorStatus::CalUnknown:
         switch( calibratorTargetState )  
         {
           case CalibratorStatus::Off:
             //Turn off 
-            analogWrite( ELPIN, 0 );
+            setELPower( brightness = 0 );
             calibratorState = Off;
             break;
           case CalibratorStatus::Ready:
             debugD( "Arming (1) timer to turn on lamp" ); 
-            analogWrite( ELPIN, brightness );
+            setELPower( brightness );
             //Turn on timer for illuminator to stabilise
             ets_timer_arm_new( &ELTimer, 5000, 0/*one-shot*/, 1);
             calibratorState = NotReady;
@@ -1005,7 +1006,6 @@ void loop()
             debugW( "Attempting to update calibratorState from Unknown to %s - valid ?", calibratorStatusCh[calibratorTargetState] ); 
           break;      
         }
-        debugV( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
         break;
       case CalibratorStatus::CalError:
         //Assume we can recover from an error by moving to a valid state. 
@@ -1018,7 +1018,7 @@ void loop()
           case CalibratorStatus::Ready:      
             //turn on to desired brightness
             debugD("Arming (2) timer to turn on lamp");
-            analogWrite( ELPIN, brightness );
+            setELPower( brightness );
             //Turn on timer for illuminator to stabilise
             ets_timer_arm_new( &ELTimer, 5000, 0/*one-shot*/, 1);
             calibratorState = NotReady;
@@ -1034,14 +1034,13 @@ void loop()
             debugW("targetstates invalid : %d", calibratorTargetState );
             break;          
         }
-        debugV( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );        
         break;      
 
       default:
         debugE( "Unknown calibrator state on entry! %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );
         break;
     }
-  //debugI( "Exited - final state %s, target State %s", calibratorStatusCh[calibratorState], calibratorStatusCh[calibratorTargetState] );        
+  debugV( "Exited - final state %s, target State %s, brightnessL %i", calibratorStatusCh[(int) calibratorState], calibratorStatusCh[ (int) calibratorTargetState], brightness );        
   return 0;
  }
  
@@ -1109,8 +1108,8 @@ void callback(char* topic, byte* payload, unsigned int length)
   JsonObject& root = jsonBuffer.createObject();
   root[F("Time")] = timestamp;
   root["hostname"] = myHostname;
-  root["coverState"] = coverState;
-  root["calibratorState"] = calibratorState;
+  root["coverState"] = (int) coverState;
+  root["calibratorState"] = (int) calibratorState;
   
   root.printTo( output);
   
@@ -1133,47 +1132,114 @@ void callback(char* topic, byte* payload, unsigned int length)
 //Wrapped into a function to allow us to isolate this for different behaviours under PCA9865 and direct to dedicated servo
  void setRCPower( bool powerState )
  {
+  
 #if defined USE_PCA9865
-//powerpin maps to the pin used to control the /OE pin on the PCA9865
-  //digitalWrite( POWERPIN, powerState );
+  debugD( "Setting RCRCPOWERPIN pca9685 power state to %d", powerState );
+#if defined REVERSE_POWER_LOGIC
+//RCPOWERPIN maps to the io pin used to power the base or gate of the transistor providing power to the servo 
+  
+  digitalWrite( RCPOWERPIN, !powerState );
 #else
-//powerpin maps to the io pin used to power the base or gate of the transistor providing power to the servo 
-  //digitalWrite( POWERPIN, powerState );
+  digitalWrite( RCPOWERPIN, powerState );
+#endif
+
+#else
+  debugD( "Setting RCRCPOWERPIN SOLO RC power state to %d", powerState );
+#if defined REVERSE_POWER_LOGIC
+//RCPOWERPIN maps to the io pin used to power the base or gate of the transistor providing power to the servo 
+  digitalWrite( RCPOWERPIN, !powerState );
+#else
+  digitalWrite( RCPOWERPIN, powerState );
+#endif
+
 #endif
   //update our record. 
   rcPowerOn = powerState;
  }
+ 
+void setELPower( int pwmSetting  )
+ {
+  //RCPOWERPIN maps to the io pin used to power the base or gate of the transistor providing power to the servo 
+  debugD( "Setting new ELPower setting %d ", pwmSetting);
+#if defined REVERSE_POWER_LOGIC
+  analogWrite( ELPIN, MAXDIGITALVALUE - pwmSetting );
+#else 
+  analogWrite( ELPIN, pwmSetting );
+#endif
 
-//#define TEST_SERVO_PCA9685
+ }
+
+//#define TEST_SERVO
  void testServo(void)
  {
   int i = 0, j = 0;
+  int pwmIncrement = 15;
 
   setRCPower( RCPOWERPIN_ON );
-  delay( 500);
-  setRCPower( RCPOWERPIN_OFF );
-  delay( 500);
-  setRCPower( RCPOWERPIN_ON );
-  delay( 500);
-  setRCPower( RCPOWERPIN_OFF );
-  delay( 500);
- 
-#if defined TEST_SERVO_PCA9685
-  debugI("Testing PCA9685 servo controller ");
-  setRCPower( RCPOWERPIN_ON );
+  delay( 1000 );
+  
   for ( i=0; i< flapCount ; i++ )
   {
-      for ( j= 30; j< 160; j+= 5 ) 
+      for ( j= 30; j< 160; j+= pwmIncrement ) 
       {
          Serial.printf( "channel[%d] set to %d\n", i, j );
+#if defined TEST_SERVO_PCA9685
          pwmController.setChannelPWM(  i, pwmServo.pwmForAngle( j - 90 ) );
-         delay(20);
-      }
-  }
-  setRCPower( RCPOWERPIN_OFF );
-  debugI("Servo testing complete "); 
 #else //test the single servo pin case. 
-  //TODO
-  ;
+         setSoloRCPosition ( j  );
 #endif
+         delay(250);
+         yield();
+      }
+      
+  }
+  //down
+  for ( i= flapCount-1; i>= 0 ; i-- )
+  {
+      for ( j= 160; j>30; j-= pwmIncrement ) 
+      {
+         Serial.printf( "channel[%d] set to %d\n", i, j );
+#if defined TEST_SERVO_PCA9685
+         pwmController.setChannelPWM(  i, pwmServo.pwmForAngle( j - 90 ) );
+#else //test the single servo pin case. 
+         setSoloRCPosition ( j  );
+#endif
+         delay(1000);
+         yield();
+      }
+      
+  }
+  //setRCPower( RCPOWERPIN_OFF );
+  debugI("Servo testing complete "); 
  }
+
+ void setup_wifi()
+{
+  int zz = 0;
+  WiFi.mode(WIFI_STA); 
+  WiFi.hostname( myHostname );
+  //WiFi.begin( ssid2, password2 );
+  WiFi.begin( ssid1, password1 );
+  Serial.print(F("Searching for WiFi.."));
+  while (WiFi.status() != WL_CONNECTED) 
+  {
+    delay(500);
+      Serial.print(F("."));
+   if ( zz++ > 200 ) 
+    device.restart();
+  }
+
+  Serial.println(F("WiFi connected") );
+  Serial.printf("SSID: %s, Signal strength %i dBm \n\r", WiFi.SSID().c_str(), WiFi.RSSI() );
+  Serial.printf("Hostname: %s\n\r",      WiFi.hostname().c_str() );
+  Serial.printf("IP address: %s\n\r",    WiFi.localIP().toString().c_str() );
+  Serial.printf("DNS address 0: %s\n\r", WiFi.dnsIP(0).toString().c_str() );
+  Serial.printf("DNS address 1: %s\n\r", WiFi.dnsIP(1).toString().c_str() );
+
+  //Setup sleep parameters
+  //wifi_set_sleep_type(LIGHT_SLEEP_T);
+  wifi_set_sleep_type(NONE_SLEEP_T);
+
+  delay(5000);
+  Serial.println( "WiFi connected" );
+}
