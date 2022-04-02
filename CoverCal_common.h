@@ -59,7 +59,8 @@ Using an ESP8266_12 this leaves a number of pins free to be a digital device.
 
 //Define this to enable use of the PWM servo breakout multiple-servo interface for multi-leaf covers. 
 //Otherwise it dedicates a single pin to manage a single servo
-//#define USE_SERVO_PCA9685 
+//Only for Espacc03 so far. 
+#define USE_SERVO_PCA9685 
 
 #if defined USE_SERVO_PCA9685
 #define MAX_SERVOS 16
@@ -88,15 +89,17 @@ const String Description = "Skybadger ESP2866-based wireless ASCOM Cover-calibra
 const String InterfaceVersion = "1.1";
 const String DriverType = "CoverCalibrator"; //Must be a valid ASCOM type to be recognised by UDP discovery. 
 
+//const char* defaultHostname = "espACC00";
 //char GUID[] = "0012-0000-0000-0000";//prototype
+
 //const char* defaultHostname = "espACC01";
 //char GUID[] = "0012-0000-0000-0001";//Hi-power 8V single servo instance: servo power control, servo PWM directly provided, illuminator/heater PWM
 
-const char* defaultHostname = "espACC02";
-char GUID[] = "0012-0000-0000-0002";//6v single servo instance: servo power control, servo PWM directly provided, illuminator/heater PWM
+//const char* defaultHostname = "espACC02";
+//char GUID[] = "0012-0000-0000-0002";//6v single servo instance: servo power control, servo PWM directly provided, illuminator/heater PWM
 
-//const char* defaultHostname = "espACC03";
-//char GUID[] = "0012-0000-0000-0003";//PCA_9685 standard multi-servo instance: multi-servo on i2c, illuminator/heater PWM 
+const char* defaultHostname = "espACC03";
+char GUID[] = "0012-0000-0000-0003";//PCA_9685 standard multi-servo instance: multi-servo on i2c, illuminator/heater PWM 
 
 const int defaultInstanceNumber = 0;
 

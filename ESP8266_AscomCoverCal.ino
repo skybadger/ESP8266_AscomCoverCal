@@ -133,7 +133,7 @@ char* thisID = nullptr;
 
 //Private variables for the driver
 bool elPresent = false;
-bool coverPresent = false; 
+bool coverPresent = true; 
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -183,13 +183,18 @@ int manageCoverState( CoverStatus coverTargetState );
 
 //wrapper function used to control output power transistor for servo/PCA9865
 void setRCPower( bool powerState );
+
+#if !defined USE_SERVO_PCA9685
 void setSoloRCPosition(int value );
+#endif 
 
 //wrapper function used to control output power transistor for calibrator panel illumination
 void setELPower( int pwmSetting  );
 
 //Unit servo test function 
+#if defined TEST_SERVO
 void testServo();
+#endif 
 
 //Timer handler for 'soft' interrupt handler
 void onTimer( void* pArg )
@@ -398,11 +403,13 @@ void onELTimeoutTimer(void * pArg)
   targetCalibratorState = CalibratorStatus::Ready;
 }
 
+#if !defined USE_SERVO_PCA9685
 void setSoloRCPosition( int input )
 {
   myServo.write( input );
   //analogWrite( RCPIN, map( input, 0 , 256, 0, 1024 )  );
 }
+#endif 
 
 void setup()
 {
@@ -1133,7 +1140,7 @@ void callback(char* topic, byte* payload, unsigned int length)
  void setRCPower( bool powerState )
  {
   
-#if defined USE_PCA9865
+#if defined USE_SERVO_PCA9685
   debugD( "Setting RCRCPOWERPIN pca9685 power state to %d", powerState );
 #if defined REVERSE_POWER_LOGIC
 //RCPOWERPIN maps to the io pin used to power the base or gate of the transistor providing power to the servo 
@@ -1169,7 +1176,7 @@ void setELPower( int pwmSetting  )
 
  }
 
-//#define TEST_SERVO
+#if defined TEST_SERVO
  void testServo(void)
  {
   int i = 0, j = 0;
@@ -1183,15 +1190,14 @@ void setELPower( int pwmSetting  )
       for ( j= 30; j< 160; j+= pwmIncrement ) 
       {
          Serial.printf( "channel[%d] set to %d\n", i, j );
-#if defined TEST_SERVO_PCA9685
+#if defined USE_SERVO_PCA9685
          pwmController.setChannelPWM(  i, pwmServo.pwmForAngle( j - 90 ) );
 #else //test the single servo pin case. 
          setSoloRCPosition ( j  );
 #endif
          delay(250);
          yield();
-      }
-      
+      }     
   }
   //down
   for ( i= flapCount-1; i>= 0 ; i-- )
@@ -1207,19 +1213,19 @@ void setELPower( int pwmSetting  )
          delay(1000);
          yield();
       }
-      
   }
-  //setRCPower( RCPOWERPIN_OFF );
+  setRCPower( RCPOWERPIN_OFF );
   debugI("Servo testing complete "); 
  }
+#endif //test servo
 
  void setup_wifi()
 {
   int zz = 0;
   WiFi.mode(WIFI_STA); 
   WiFi.hostname( myHostname );
-  //WiFi.begin( ssid2, password2 );
-  WiFi.begin( ssid1, password1 );
+  WiFi.begin( ssid2, password2 );
+  //WiFi.begin( ssid1, password1 );
   Serial.print(F("Searching for WiFi.."));
   while (WiFi.status() != WL_CONNECTED) 
   {
