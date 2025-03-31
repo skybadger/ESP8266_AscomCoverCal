@@ -86,7 +86,7 @@ const String DriverName = "Skybadger.CoverCalibrator";
 const String DriverVersion = "0.9";
 const String DriverInfo = "Skybadger.ESPCoverCal RESTful native device. ";
 const String Description = "Skybadger ESP2866-based wireless ASCOM Cover-calibrator device";
-const integer InterfaceVersion = 1; 
+const uint32 InterfaceVersion = 1; 
 const String DriverType = "CoverCalibrator"; //Must be a valid ASCOM type to be recognised by UDP discovery. 
 
 //const char* defaultHostname = "espACC00";
