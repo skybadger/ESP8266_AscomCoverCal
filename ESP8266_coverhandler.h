@@ -68,7 +68,7 @@ void handlerBrightnessGet(void)
     String message;
     uint32_t clientID= -1;
     uint32_t transID = -1;
-    String argToSearchFor[] = { "clientID", "ClientTransactionID", };
+    String argToSearchFor[] = { "ClientID", "ClientTransactionID", };
     
     if( hasArgIC( argToSearchFor[0], server, false ) )
       clientID = server.arg(argToSearchFor[0]).toInt();
@@ -94,7 +94,7 @@ void handlerMaxBrightnessGet(void)
     String message;
     uint32_t clientID= -1;
     uint32_t transID = -1;
-    String argToSearchFor[] = { "clientID", "ClientTransactionID", };
+    String argToSearchFor[] = { "ClientID", "ClientTransactionID", };
     
     if( hasArgIC( argToSearchFor[0], server, false ) )
       clientID = server.arg(argToSearchFor[0]).toInt();
@@ -120,7 +120,7 @@ void handlerCoverStateGet(void)
 
     uint32_t clientID= -1;
     uint32_t transID = -1;
-    String argToSearchFor[] = { "clientID", "ClientTransactionID", };
+    String argToSearchFor[] = { "ClientID", "ClientTransactionID", };
     DynamicJsonBuffer jsonBuffer(256);
     
     if( hasArgIC( argToSearchFor[0], server, false ) )
@@ -384,7 +384,7 @@ void handlerOpenCoverPut(void)
 
     uint32_t clientID= -1;
     uint32_t transID = -1;
-    String argToSearchFor[] = { "clientID", "ClientTransactionID", };
+    String argToSearchFor[] = { "ClientID", "ClientTransactionID", };
     
     if( hasArgIC( argToSearchFor[0], server, false ) )
       clientID = server.arg(argToSearchFor[0]).toInt();
@@ -425,7 +425,7 @@ void handlerNotFound()
   int responseCode = 400;
   uint32_t clientID= -1;
   uint32_t transID = -1;
-  String argToSearchFor[] = { "clientID", "ClientTransactionID", };
+  String argToSearchFor[] = { "ClientID", "ClientTransactionID", };
   
   if( hasArgIC( argToSearchFor[0], server, false ) )
     clientID = server.arg(argToSearchFor[0]).toInt();
@@ -461,7 +461,7 @@ void handlerNotImplemented()
   int responseCode = 400;
   uint32_t clientID= -1;
   uint32_t transID = -1;
-  String argToSearchFor[] = { "clientID", "ClientTransactionID", };
+  String argToSearchFor[] = { "ClientID", "ClientTransactionID", };
   
   if( hasArgIC( argToSearchFor[0], server, false ) )
     clientID = server.arg(argToSearchFor[0]).toInt();

@@ -43,8 +43,6 @@ void setDefaults( void )
 
   udpPort = ALPACA_DISCOVERY_PORT; 
   
-  flapCount = 6;
-  
   if( flapMinLimit != nullptr )
     free ( flapMinLimit); 
   flapMinLimit =  (int*) calloc( sizeof(int) , flapCount );

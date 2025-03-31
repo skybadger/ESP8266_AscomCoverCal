@@ -60,7 +60,7 @@ Using an ESP8266_12 this leaves a number of pins free to be a digital device.
 //Define this to enable use of the PWM servo breakout multiple-servo interface for multi-leaf covers. 
 //Otherwise it dedicates a single pin to manage a single servo
 //Only for Espacc03 so far. 
-#define USE_SERVO_PCA9685 
+//#define USE_SERVO_PCA9685 
 
 #if defined USE_SERVO_PCA9685
 #define MAX_SERVOS 16
@@ -83,23 +83,23 @@ int connectionCtr = 0; //variable to count number of times something has connect
 extern const unsigned int NOT_CONNECTED;//Sourced from ASCOM_COMMON
 unsigned int connected = NOT_CONNECTED;
 const String DriverName = "Skybadger.CoverCalibrator";
-const String DriverVersion = "0.0.1";
+const String DriverVersion = "0.9";
 const String DriverInfo = "Skybadger.ESPCoverCal RESTful native device. ";
 const String Description = "Skybadger ESP2866-based wireless ASCOM Cover-calibrator device";
-const String InterfaceVersion = "1.1";
+const integer InterfaceVersion = 1; 
 const String DriverType = "CoverCalibrator"; //Must be a valid ASCOM type to be recognised by UDP discovery. 
 
 //const char* defaultHostname = "espACC00";
 //char GUID[] = "0012-0000-0000-0000";//prototype
 
-//const char* defaultHostname = "espACC01";
-//char GUID[] = "0012-0000-0000-0001";//Hi-power 8V single servo instance: servo power control, servo PWM directly provided, illuminator/heater PWM
+const char* defaultHostname = "espACC01";
+char GUID[] = "0012-0000-0000-0001";//Hi-power 8V single servo instance: servo power control, servo PWM directly provided, illuminator/heater PWM
 
 //const char* defaultHostname = "espACC02";
 //char GUID[] = "0012-0000-0000-0002";//6v single servo instance: servo power control, servo PWM directly provided, illuminator/heater PWM
 
-const char* defaultHostname = "espACC03";
-char GUID[] = "0012-0000-0000-0003";//PCA_9685 standard multi-servo instance: multi-servo on i2c, illuminator/heater PWM 
+//const char* defaultHostname = "espACC03";
+//char GUID[] = "0012-0000-0000-0003";//PCA_9685 standard multi-servo instance: multi-servo on i2c, illuminator/heater PWM 
 
 const int defaultInstanceNumber = 0;
 
@@ -137,6 +137,9 @@ const int rcMinLimit = 0;
 const int rcMaxLimit = 180;
 const int rcMinLimitDefault = 30;
 const int rcMaxLimitDefault = 150;
+//This defines the direction of rotation of the servo and uses rcMaxLimit as the inversion value in setRCSoloPosition
+//Required since the cheaper HT810 servos rotated one way and yet the 20Kgcm servos rotated the other!. 
+#define REVERSE_SERVO_DIRECTION 1
 #define RCPOSITIONINCREMENT ((int) 2)
 #define RCFLAPTIME 50
 #define MULTIFLAPSINCREMENTCOUNT ((int) 10)

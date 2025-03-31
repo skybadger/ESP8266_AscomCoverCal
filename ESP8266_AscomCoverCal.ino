@@ -14,6 +14,7 @@
 Notes: 
  
  To do:
+ 
  Complete Setup page chunking - in progress - ready for test
  Test multiple leaf servo control
   
@@ -60,13 +61,14 @@ Change Log
            Updated GUID to recognise this device  
            Added ability to set which method of opening flaps is used - enum created. Set at compile time unless a REST call is added.     
  
-30/01/2022 Added PNP output transistor to board for 6-flap cover using Rx as control. POtential conflict with 
+30/01/2022 Added PNP output transistor to board for 6-flap cover using Rx as control. Potential conflict with 
            other boards already using Tx. Need to check. 
            Updated setBrightness function from html pages to properly check for brightness control 
-           Probably neeed to spluit turn on/off from setBrightness handler & presentation
-           replaced &amp; with &nbsp; as intended. 
-            
- 
+           Probably neeed to split turn on/off from setBrightness handler & presentation
+           Replaced &amp; with &nbsp; as intended. 
+05/05/2022 Added REVERSE_SERVO_DIRECTION flag to common to enable servo direction to be reversed as a static flag. 
+           Currently only implemented for setRCSoloPosition            
+01/04/2025 Updated Interface version to int32 (1) as required by ASCOM 7 strict json parser after working fine for years in ASCOM 6
  */
 
 #include "CoverCal_common.h"
@@ -330,16 +332,15 @@ void onRCTimeoutTimer( void * pArg )
   bool restartTimer = false;
   static int flapId = 0;
   
-  flapId = (flapId + flapCount) % flapCount;
+  flapId = 0;
   
   debugV( "Updating cover servo %d - position %d", flapId, flapPosition[flapCount -1 ] );
   if( targetCoverState == CoverStatus::Open )
   {
-    if( flapPosition[ flapCount -1] >= flapMaxLimit[flapCount -1] )
+    if( flapPosition[ flapId ] >= flapMaxLimit[flapId] )
     {
       coverState = CoverStatus::Open;
       setRCPower( RCPOWERPIN_OFF ); //turn power off
-      flapId = flapCount - 1;
       restartTimer = false;
     }
     else 
@@ -350,7 +351,6 @@ void onRCTimeoutTimer( void * pArg )
       }
       flapPosition[ flapId ] += RCPOSITIONINCREMENT;
       setSoloRCPosition( flapPosition[ flapId ] );
-      flapId++;
       restartTimer = true;
     }
   }
@@ -406,7 +406,11 @@ void onELTimeoutTimer(void * pArg)
 #if !defined USE_SERVO_PCA9685
 void setSoloRCPosition( int input )
 {
+#if defined REVERSE_SERVO_DIRECTION
+  myServo.write( rcMaxLimit - input );
+#else
   myServo.write( input );
+#endif
   //analogWrite( RCPIN, map( input, 0 , 256, 0, 1024 )  );
 }
 #endif 
@@ -597,9 +601,11 @@ void setup()
 
 //Management interface calls.
 /* ALPACA Management and setup interfaces
- * The main browser setup URL would be http://<hostname>/api/v1/setup 192.168.1.89:7843/setup
- * The JSON list of supported interface versions would be available through a GET to http://192.168.1.89:7843/management/apiversions
- * The JSON list of configured ASCOM devices would be available through a GET to http://192.168.1.89:7843/management/v1/configureddevices
+ * The main browser setup URL would be http://<hostname>:<port>/api/v1/setup  
+ * The JSON list of supported interface versions would be available through a GET to http://<hostname>:<port>/management/apiversions
+ * The JSON list of configured ASCOM devices would be available through a GET to http://<hostname>:<port>/management/v1/configureddevices
+ * Where <hostname> is whatever you set it to be at wifi startup time via myHostname 
+ * and the port is set in the Web server settings - typically 80.
  */
   //Management API - https://www.ascom-standards.org/api/?urls.primaryName=ASCOM%20Alpaca%20Management%20API#/Management%20Interface%20(JSON)
   server.on(F("/management/apiversions"),             HTTP_GET, handleMgmtVersions );
